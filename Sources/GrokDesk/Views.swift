@@ -197,6 +197,7 @@ struct AppSidebar: View {
     let hideSidebar: () -> Void
     @State private var collapsedProjects: Set<String> = []
     @State private var deleteCandidate: Conversation?
+    @State private var isWindowFullScreen = false
 
     private var projects: [ConversationProject] {
         Dictionary(grouping: model.conversations.filter {
@@ -217,7 +218,12 @@ struct AppSidebar: View {
                 Button(action: model.newConversation) { Image(systemName: "square.and.pencil") }
                     .buttonStyle(.plain).help("新对话 ⌘N")
             }
-            .padding(.horizontal, 13).padding(.top, 12).padding(.bottom, 8)
+            // A regular hidden-titlebar window needs room for the traffic-light
+            // controls. Fullscreen has no traffic lights, so it uses the compact
+            // Codex-style top inset instead of keeping an empty titlebar band.
+            .padding(.horizontal, 13)
+            .padding(.top, isWindowFullScreen ? 10 : 28)
+            .padding(.bottom, 8)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
@@ -279,6 +285,11 @@ struct AppSidebar: View {
                 .zIndex(20)
         }
         .background(Color.grokSidebarSurface.ignoresSafeArea())
+        .overlay(alignment: .topLeading) {
+            WindowFullscreenObserver(isFullScreen: $isWindowFullScreen)
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+        }
         .onAppear { model.syncLocalSessions() }
         .alert("永久删除这个 Session？", isPresented: Binding(
             get: { deleteCandidate != nil }, set: { if !$0 { deleteCandidate = nil } }

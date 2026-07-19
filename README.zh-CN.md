@@ -1,0 +1,92 @@
+# GrokDesk
+
+<p align="center">
+  <img src="Resources/AppIcon.png" width="128" alt="GrokDesk 图标">
+</p>
+
+<p align="center">
+  面向 <a href="https://github.com/xai-org/grok-build">Grok Build</a> 的原生开源 macOS 桌面客户端。
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> · 简体中文
+</p>
+
+> [!IMPORTANT]
+> GrokDesk 是独立的社区项目，与 xAI 没有关联，也未获得其认可。Grok 与 Grok Build 是其各自所有者的商标。
+
+GrokDesk 将本机 Grok Build Runtime 的 ACP/JSON-RPC 能力呈现为现代化的原生 SwiftUI 桌面界面。它不是内嵌终端，也不会重新实现 Grok Agent；文件、Shell、Git、MCP、Skills、Plugins、Hooks、Memory、Subagent 等能力仍由本机 Grok Build 执行。
+
+## 功能
+
+- 原生 macOS 会话界面，支持 Markdown、代码块、表格、链接和附件预览。
+- 按真实执行顺序展示思考、文件与搜索、命令、Skills、Hooks、计划、权限、交互和 Runtime 事件；相邻同类事件可折叠，原始详情可查看。
+- 直接读取并恢复本机 Grok Session，按工作文件夹组织对话，支持归档、搜索和删除。
+- 选择工作目录、模型、推理强度和权限模式，并支持停止、追加提示、Context Window 展示和自动上下文压缩。
+- Skills 浏览、启停、详情查看和斜杠触发；保留未知 ACP / `x.ai/*` 扩展事件，避免新能力被旧 UI 静默丢弃。
+- 图片和文件选择、拖放、复制粘贴以及详情预览。
+- 多账号登录、改名、启停和拖拽排序；支持智能额度优先、顺序、轮询和固定账号路由。
+- 周/月额度、本轮账号、Context Window 和 Runtime 状态可视化。
+- 浅色、深色和跟随系统外观；English 与简体中文界面。
+
+## 系统要求
+
+- macOS 14 Sonoma 或更高版本
+- Apple Silicon 或 Intel Mac
+- 可用的 Grok Build 账号
+
+GrokDesk **不包含 Grok Build 源码或二进制**。首次启动时会检查设置路径、`~/.grok/bin/grok`、Homebrew 常见目录和 `PATH`。若未安装，App 会先征求确认，再按照 [Grok Build 官方仓库](https://github.com/xai-org/grok-build#installing-the-released-binary) 的说明调用 xAI 官方安装器；不会静默下载安装。
+
+也可以手动安装：
+
+```bash
+curl -fsSL https://x.ai/cli/install.sh | bash
+grok --version
+```
+
+## 从源码构建
+
+```bash
+git clone https://github.com/KAMIENDER/GrokDesk.git
+cd GrokDesk
+./script/build_and_run.sh --verify
+```
+
+或只构建 Swift Package：
+
+```bash
+swift build -c release --product GrokDesk
+```
+
+生成的应用位于 `dist/GrokDesk.app`。开发构建使用临时签名，首次打开时 macOS 可能要求在“系统设置 → 隐私与安全性”中确认。
+
+## 架构
+
+```text
+GrokDesk (SwiftUI)
+  ├─ AppModel 与本地展示状态
+  ├─ ACPBridge（通过 stdio 连接 Grok Build Agent）
+  ├─ 本地 Session 与 Skill 索引
+  └─ 各账号隔离的 GROK_HOME 环境
+       └─ 本机 Grok Build Runtime
+```
+
+ACP 事件名称与原始 payload 始终是权威数据。UI 会为已知事件提供更丰富的展示，但不会丢弃新版 Runtime 上报的未知事件。
+
+## 本地数据与隐私
+
+GrokDesk 的 UI 状态和附加数据保存在：
+
+```text
+~/Library/Application Support/GrokDesk/
+```
+
+Grok Build 的默认数据仍位于 `~/.grok/`。多账号凭据保存在 GrokDesk 为每个账号建立的独立 `GROK_HOME` 中；Session 历史保持本机共享，不绑定某个账号，因此健康账号可以继续同一个 Session。GrokDesk 不会将 Token、Session、Memory 或工作区文件上传到本项目仓库。
+
+## 参与贡献
+
+欢迎提交 Issue 与 Pull Request。请勿提交凭据、本地 Session 数据、构建生成的 App Bundle 或 Grok Build 源码。
+
+## 许可证
+
+[MIT](LICENSE)
