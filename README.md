@@ -32,7 +32,8 @@ GrokDesk presents the ACP/JSON-RPC capabilities of a local Grok Build runtime th
 ## Requirements
 
 - macOS 14 Sonoma or later
-- Apple Silicon or Intel Mac
+- Apple Silicon for the current prebuilt release
+- Intel Macs can build GrokDesk from source
 - A valid Grok Build account
 
 GrokDesk does **not** vendor Grok Build source or binaries. At launch, it checks the configured runtime path, `~/.grok/bin/grok`, common Homebrew locations, and `PATH`. If Grok Build is unavailable, GrokDesk asks for confirmation before running the official xAI installer documented by the [Grok Build repository](https://github.com/xai-org/grok-build#installing-the-released-binary). It never installs the runtime silently.
@@ -43,6 +44,12 @@ You can also install Grok Build manually:
 curl -fsSL https://x.ai/cli/install.sh | bash
 grok --version
 ```
+
+## Download and install
+
+Download the Apple Silicon archive from [GitHub Releases](https://github.com/KAMIENDER/GrokDesk/releases), unzip it, and move `GrokDesk.app` to `/Applications`.
+
+The current community build is ad-hoc signed and has not been notarized by Apple. On first launch, Control-click `GrokDesk.app`, choose **Open**, and confirm the macOS prompt. A notarized, warning-free distribution requires an Apple Developer ID certificate, which is not currently available to this project.
 
 ## Build from source
 
