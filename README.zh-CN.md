@@ -47,7 +47,7 @@ grok --version
 
 ## 下载与安装
 
-从 [GitHub Releases](https://github.com/KAMIENDER/GrokDesk/releases) 下载 Apple Silicon 压缩包，解压后将 `GrokDesk.app` 移入“应用程序”目录。
+从 [GitHub Releases](https://github.com/KAMIENDER/GrokDesk/releases) 下载 Apple Silicon DMG，打开后将 `GrokDesk.app` 拖到 `Applications` 快捷入口。ZIP 压缩包继续作为便携备用版本提供。
 
 当前社区构建使用临时签名，尚未通过 Apple 公证。首次启动时请按住 Control 点击 `GrokDesk.app`，选择“打开”，再确认 macOS 提示。要实现没有 Gatekeeper 警告的直接安装，需要 Apple Developer ID 证书；本项目目前尚未配置该证书。
 
@@ -66,6 +66,12 @@ swift build -c release --product GrokDesk
 ```
 
 生成的应用位于 `dist/GrokDesk.app`。开发构建使用临时签名，首次打开时 macOS 可能要求在“系统设置 → 隐私与安全性”中确认。
+
+如需生成拖拽安装 DMG：
+
+```bash
+./scripts/package-dmg.sh
+```
 
 ## 架构
 

@@ -47,7 +47,7 @@ grok --version
 
 ## Download and install
 
-Download the Apple Silicon archive from [GitHub Releases](https://github.com/KAMIENDER/GrokDesk/releases), unzip it, and move `GrokDesk.app` to `/Applications`.
+Download the Apple Silicon DMG from [GitHub Releases](https://github.com/KAMIENDER/GrokDesk/releases), open it, and drag `GrokDesk.app` onto the `Applications` shortcut. The ZIP archive remains available as a portable alternative.
 
 The current community build is ad-hoc signed and has not been notarized by Apple. On first launch, Control-click `GrokDesk.app`, choose **Open**, and confirm the macOS prompt. A notarized, warning-free distribution requires an Apple Developer ID certificate, which is not currently available to this project.
 
@@ -66,6 +66,12 @@ swift build -c release --product GrokDesk
 ```
 
 The packaged application is written to `dist/GrokDesk.app`. Development builds use ad-hoc signing, so macOS may ask you to confirm the first launch in **System Settings → Privacy & Security**.
+
+To create the drag-to-install DMG:
+
+```bash
+./scripts/package-dmg.sh
+```
 
 ## Architecture
 
