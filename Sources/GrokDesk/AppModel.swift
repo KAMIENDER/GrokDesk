@@ -957,7 +957,19 @@ final class AppModel: ObservableObject {
             upsertTimelineEvent(.init(id: "thought", kind: "thought", title: "思考过程", status: nil,
                                       input: nil, output: value), conversationID: conversationID)
         }
-        else { conversations[c].messages[m].text += text }
+        else {
+            var chunk = text
+            let existing = conversations[c].messages[m].text
+            // ACP may emit a progress sentence and then begin the final answer with a
+            // Markdown block in the next chunk. Keep the block on its own line so a
+            // heading/list cannot be merged into the preceding sentence while streaming.
+            if !existing.isEmpty,
+               !existing.hasSuffix("\n"),
+               MarkdownStreamBoundary.startsBlock(chunk) {
+                chunk = "\n\n" + chunk
+            }
+            conversations[c].messages[m].text += chunk
+        }
     }
 
     private func sendHeadless(_ prompt: String, account: GrokAccount, index: Int) {
@@ -1006,5 +1018,24 @@ final class AppModel: ObservableObject {
 
     func addAttachments(_ urls: [URL]) {
         pendingAttachments.append(contentsOf: urls.filter { !pendingAttachments.contains($0) })
+    }
+}
+
+private enum MarkdownStreamBoundary {
+    static func startsBlock(_ chunk: String) -> Bool {
+        let value = chunk.drop(while: { $0 == " " || $0 == "\t" })
+        guard !value.isEmpty else { return false }
+        if value.hasPrefix("```") || value.hasPrefix("> ") || value.hasPrefix("---") { return true }
+        if value.hasPrefix("- ") || value.hasPrefix("* ") || value.hasPrefix("+ ") { return true }
+        if value.first == "#" {
+            let hashes = value.prefix(while: { $0 == "#" }).count
+            return (1...6).contains(hashes) && value.dropFirst(hashes).first == " "
+        }
+        var digits = 0
+        for character in value {
+            if character.isNumber { digits += 1; continue }
+            return digits > 0 && character == "." && value.dropFirst(digits + 1).first == " "
+        }
+        return false
     }
 }

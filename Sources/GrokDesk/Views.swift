@@ -1461,21 +1461,40 @@ struct MarkdownText: View {
         VStack(alignment: .leading, spacing: 14) {
             ForEach(blocks) { block in
                 switch block.content {
-                case .prose(let value):
-                    if let attributed = try? AttributedString(
-                        markdown: value,
-                        options: .init(interpretedSyntax: .full)
-                    ) {
-                        Text(attributed)
-                            .font(.system(size: 15))
-                            .textSelection(.enabled)
-                            .lineSpacing(6)
-                    } else {
-                        Text(value)
-                            .font(.system(size: 15))
-                            .textSelection(.enabled)
-                            .lineSpacing(6)
-                    }
+                case .paragraph(let value):
+                    MarkdownInline(text: value)
+                        .font(.system(size: 15))
+                        .lineSpacing(6)
+                case .heading(let level, let value):
+                    MarkdownInline(text: value)
+                        .font(.system(size: headingSize(level)))
+                        .fontWeight(level <= 2 ? .bold : .semibold)
+                        .padding(.top, level == 1 ? 5 : 2)
+                case .unorderedList(let values):
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(Array(values.enumerated()), id: \.offset) { _, value in
+                            HStack(alignment: .firstTextBaseline, spacing: 9) {
+                                Text("•").frame(width: 10, alignment: .center)
+                                MarkdownInline(text: value).frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }.font(.system(size: 15)).lineSpacing(5)
+                case .orderedList(let values):
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(Array(values.enumerated()), id: \.offset) { _, item in
+                            HStack(alignment: .firstTextBaseline, spacing: 9) {
+                                Text("\(item.number).").frame(minWidth: 18, alignment: .trailing)
+                                MarkdownInline(text: item.text).frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }.font(.system(size: 15)).lineSpacing(5)
+                case .quote(let value):
+                    HStack(alignment: .top, spacing: 10) {
+                        RoundedRectangle(cornerRadius: 1).fill(.secondary.opacity(0.35)).frame(width: 3)
+                        MarkdownInline(text: value).foregroundStyle(.secondary)
+                    }.font(.system(size: 15)).lineSpacing(6)
+                case .divider:
+                    Divider()
                 case .code(let language, let value):
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
@@ -1519,10 +1538,18 @@ struct MarkdownText: View {
             }
         }
     }
+
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level { case 1: return 22; case 2: return 19; case 3: return 17; default: return 15 }
+    }
 }
 
 private struct MarkdownBlock: Identifiable {
-    enum Content { case prose(String), code(String, String), table([[String]]) }
+    struct OrderedItem { let number: Int; let text: String }
+    enum Content {
+        case paragraph(String), heading(Int, String), unorderedList([String]), orderedList([OrderedItem])
+        case quote(String), divider, code(String, String), table([[String]])
+    }
     let id = UUID()
     let content: Content
 
@@ -1551,7 +1578,7 @@ private struct MarkdownBlock: Identifiable {
             else { prose.append(line) }
         }
         if insideCode { flushCode() } else { flushProse() }
-        return result.isEmpty ? [MarkdownBlock(content: .prose(markdown))] : result
+        return result.isEmpty ? [MarkdownBlock(content: .paragraph(markdown))] : result
     }
 
     private static func parseProseAndTables(_ value: String) -> [MarkdownBlock] {
@@ -1561,7 +1588,7 @@ private struct MarkdownBlock: Identifiable {
         func flush() {
             let text = prose.joined(separator: "\n")
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.append(MarkdownBlock(content: .prose(text)))
+                result.append(MarkdownBlock(content: .paragraph(text)))
             }
             prose.removeAll()
         }
@@ -1574,12 +1601,84 @@ private struct MarkdownBlock: Identifiable {
                     rows.append(tableCells(lines[index])); index += 1
                 }
                 result.append(MarkdownBlock(content: .table(rows)))
-            } else {
-                prose.append(lines[index]); index += 1
+                continue
             }
+
+            let line = lines[index]
+            if line.trimmingCharacters(in: .whitespaces).isEmpty { flush(); index += 1; continue }
+            if let embedded = splitEmbeddedHeading(line) {
+                prose.append(embedded.prefix); flush()
+                result.append(MarkdownBlock(content: .heading(embedded.level, embedded.title)))
+                index += 1; continue
+            }
+            if let heading = heading(line) {
+                flush(); result.append(MarkdownBlock(content: .heading(heading.level, heading.title)))
+                index += 1; continue
+            }
+            if isDivider(line) {
+                flush(); result.append(MarkdownBlock(content: .divider)); index += 1; continue
+            }
+            if let item = unorderedItem(line) {
+                flush(); var items: [String] = [item]; index += 1
+                while index < lines.count, let next = unorderedItem(lines[index]) { items.append(next); index += 1 }
+                result.append(MarkdownBlock(content: .unorderedList(items))); continue
+            }
+            if let item = orderedItem(line) {
+                flush(); var items: [OrderedItem] = [item]; index += 1
+                while index < lines.count, let next = orderedItem(lines[index]) { items.append(next); index += 1 }
+                result.append(MarkdownBlock(content: .orderedList(items))); continue
+            }
+            if let quote = quoteLine(line) {
+                flush(); var values = [quote]; index += 1
+                while index < lines.count, let next = quoteLine(lines[index]) { values.append(next); index += 1 }
+                result.append(MarkdownBlock(content: .quote(values.joined(separator: "\n")))); continue
+            }
+            prose.append(line); index += 1
         }
         flush()
         return result
+    }
+
+    private static func heading(_ line: String) -> (level: Int, title: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let level = trimmed.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(level), trimmed.dropFirst(level).first == " " else { return nil }
+        return (level, String(trimmed.dropFirst(level + 1)))
+    }
+
+    private static func splitEmbeddedHeading(_ line: String) -> (prefix: String, level: Int, title: String)? {
+        for level in (1...6).reversed() {
+            let marker = String(repeating: "#", count: level) + " "
+            guard let range = line.range(of: marker), range.lowerBound != line.startIndex else { continue }
+            let prefix = String(line[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+            guard !prefix.isEmpty, prefix.last?.isPunctuation == true else { continue }
+            return (prefix, level, String(line[range.upperBound...]))
+        }
+        return nil
+    }
+
+    private static func isDivider(_ line: String) -> Bool {
+        let value = line.replacingOccurrences(of: " ", with: "")
+        return value.count >= 3 && (value.allSatisfy { $0 == "-" } || value.allSatisfy { $0 == "*" } || value.allSatisfy { $0 == "_" })
+    }
+
+    private static func unorderedItem(_ line: String) -> String? {
+        let value = line.trimmingCharacters(in: .whitespaces)
+        for marker in ["- ", "* ", "+ "] where value.hasPrefix(marker) { return String(value.dropFirst(2)) }
+        return nil
+    }
+
+    private static func orderedItem(_ line: String) -> OrderedItem? {
+        let value = line.trimmingCharacters(in: .whitespaces)
+        guard let dot = value.firstIndex(of: "."), dot != value.startIndex,
+              value[value.index(after: dot)...].first == " ",
+              let number = Int(value[..<dot]) else { return nil }
+        return OrderedItem(number: number, text: String(value[value.index(dot, offsetBy: 2)...]))
+    }
+
+    private static func quoteLine(_ line: String) -> String? {
+        let value = line.trimmingCharacters(in: .whitespaces)
+        return value.hasPrefix("> ") ? String(value.dropFirst(2)) : nil
     }
 
     private static func isTableSeparator(_ line: String) -> Bool {
