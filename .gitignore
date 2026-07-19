@@ -1,0 +1,16 @@
+.DS_Store
+.build/
+.swiftpm/
+dist/
+DerivedData/
+*.xcuserstate
+*.log
+
+# Grok Build is an external runtime dependency and is never vendored here.
+grok-build/
+
+# Local credentials and runtime state must never enter the repository.
+auth.json
+state.json
+sessions/
+memory/
