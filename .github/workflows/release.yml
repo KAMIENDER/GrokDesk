@@ -10,11 +10,13 @@ permissions:
 
 jobs:
   release:
-    # Apple Silicon keeps the published artifact aligned with GrokDesk's
-    # currently documented prebuilt platform.
-    runs-on: macos-14-xlarge
+    # Public repositories can use the standard runner without paid larger-runner
+    # capacity. SwiftPM cross-builds arm64 so the published artifact remains
+    # aligned with GrokDesk's documented Apple Silicon platform.
+    runs-on: macos-14
     env:
       SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      SWIFT_BUILD_ARCH: arm64
     steps:
       - uses: actions/checkout@v4
       - name: Validate update signing secret

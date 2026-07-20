@@ -7,10 +7,15 @@ CONTENTS="$APP_DIR/Contents"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 cd "$PROJECT_DIR"
-swift build -c release --product GrokDesk
+SWIFT_BUILD_ARGS=(-c release --product GrokDesk)
+if [[ -n "${SWIFT_BUILD_ARCH:-}" ]]; then
+  SWIFT_BUILD_ARGS+=(--arch "$SWIFT_BUILD_ARCH")
+fi
+swift build "${SWIFT_BUILD_ARGS[@]}"
+SWIFT_BIN_DIR="$(swift build "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)"
 rm -rf "$APP_DIR"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$CONTENTS/Frameworks"
-cp ".build/release/GrokDesk" "$CONTENTS/MacOS/GrokDesk"
+cp "$SWIFT_BIN_DIR/GrokDesk" "$CONTENTS/MacOS/GrokDesk"
 cp "$PROJECT_DIR/Resources/Info.plist" "$CONTENTS/Info.plist"
 cp "$PROJECT_DIR/Resources/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 cp "$PROJECT_DIR/Resources/AppIcon.png" "$CONTENTS/Resources/AppIcon.png"
