@@ -75,6 +75,8 @@ enum L10n {
         "Grok 请求执行操作": "Grok requests an action", "任务已转入后台": "Task moved to background",
         "后台任务完成": "Background task completed", "Runtime 正在重试": "Runtime is retrying",
         "正在写入 Memory": "Writing Memory", "Memory 写入完成": "Memory written",
-        "本轮执行完成": "Turn completed", "Session 回顾": "Session recap"
+        "本轮执行完成": "Turn completed", "Session 回顾": "Session recap",
+        "加载更早消息（%@ 条）": "Load earlier messages (%@)",
+        "跳到最新消息": "Jump to latest message"
     ]
 }

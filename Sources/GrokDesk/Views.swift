@@ -474,6 +474,10 @@ struct ChatView: View {
     /// one shared string lets a background stream re-render the composer while
     /// the user is editing another session and also leaks drafts on switching.
     @State private var promptsByConversation: [UUID: String] = [:]
+    @State private var visibleMessageLimit = 80
+    @State private var isNearLatestMessage = true
+
+    private static let latestMessageAnchor = "chat-latest-message-anchor"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -481,9 +485,19 @@ struct ChatView: View {
             Divider().opacity(0.55)
             messageArea
             ComposerView(prompt: selectedPrompt)
+                // A conversation switch is an editor boundary. Reusing the
+                // same AppKit text view leaks marked-text/focus synchronization
+                // from a streaming session into the newly selected draft.
+                .id(model.selectedConversationID)
                 .padding(.horizontal, 28).padding(.bottom, 18)
         }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.34))
+        .onChange(of: model.selectedConversationID) { _, _ in
+            // Opening a long chat starts from its recent turns. Older turns are
+            // opt-in so switching sessions does not eagerly build thousands of
+            // Markdown and timeline subviews.
+            visibleMessageLimit = 80
+        }
     }
 
     private var selectedPrompt: Binding<String> {
@@ -501,29 +515,105 @@ struct ChatView: View {
     }
 
     private var messageArea: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 26) {
-                    if model.selectedConversation?.messages.isEmpty != false {
-                        EmptyConversationView()
-                            .frame(maxWidth: .infinity).padding(.top, 110)
-                    } else {
-                        ForEach(model.selectedConversation?.messages ?? []) { message in
-                            MessageRow(message: message).id(message.id)
+        let messages = model.selectedConversation?.messages ?? []
+        let hiddenCount = max(messages.count - visibleMessageLimit, 0)
+        let visibleMessages = Array(messages.suffix(visibleMessageLimit))
+        return ScrollViewReader { proxy in
+            GeometryReader { viewport in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 26) {
+                        if messages.isEmpty {
+                            EmptyConversationView()
+                                .frame(maxWidth: .infinity).padding(.top, 110)
+                        } else {
+                            if hiddenCount > 0 {
+                                Button {
+                                    visibleMessageLimit += 80
+                                } label: {
+                                    Label(
+                                        L10n.format("加载更早消息（%@ 条）", language: model.settings.effectiveLanguage,
+                                                    String(hiddenCount)),
+                                        systemImage: "clock.arrow.circlepath"
+                                    )
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                            }
+                            ForEach(visibleMessages) { message in
+                                MessageRow(message: message).id(message.id)
+                            }
                         }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(Self.latestMessageAnchor)
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: ChatLatestMessagePositionKey.self,
+                                        value: geometry.frame(in: .named("chat-message-scroll")).maxY
+                                    )
+                                }
+                            }
+                    }
+                    .frame(maxWidth: 780)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 34).padding(.top, 34).padding(.bottom, 150)
+                }
+                .coordinateSpace(name: "chat-message-scroll")
+                .onPreferenceChange(ChatLatestMessagePositionKey.self) { bottomY in
+                    isNearLatestMessage = bottomY <= viewport.size.height + 72
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !messages.isEmpty && !isNearLatestMessage {
+                        Button {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo(Self.latestMessageAnchor, anchor: .bottom)
+                            }
+                        } label: {
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 34, height: 34)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.regularMaterial, in: Circle())
+                        .overlay(Circle().stroke(.separator.opacity(0.65), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                        .help(L10n.text("跳到最新消息", language: model.settings.effectiveLanguage))
+                        .padding(.trailing, 24).padding(.bottom, 18)
                     }
                 }
-                .frame(maxWidth: 780)
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 34).padding(.top, 34).padding(.bottom, 150)
-            }
-            .onChange(of: model.selectedConversation?.messages.last?.text) { _, _ in
-                if let id = model.selectedConversation?.messages.last?.id {
-                    withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(id, anchor: .bottom) }
+                .onAppear { scrollToLatest(proxy, animated: false) }
+                .onChange(of: model.selectedConversationID) { _, _ in
+                    scrollToLatest(proxy, animated: false)
+                }
+                .onChange(of: model.selectedConversation?.messages.last?.text) { _, _ in
+                    guard isNearLatestMessage else { return }
+                    scrollToLatest(proxy, animated: true)
                 }
             }
         }
     }
+
+    private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
+        // Wait until the selected transcript and its 80-message window have
+        // completed the current layout pass before resolving the anchor.
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    proxy.scrollTo(Self.latestMessageAnchor, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(Self.latestMessageAnchor, anchor: .bottom)
+            }
+            isNearLatestMessage = true
+        }
+    }
+}
+
+private struct ChatLatestMessagePositionKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 struct ChatHeader: View {

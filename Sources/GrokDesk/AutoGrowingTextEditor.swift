@@ -50,8 +50,10 @@ struct AutoGrowingTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let textView = context.coordinator.textView else { return }
         (textView as? AttachmentTextView)?.onPasteAttachments = context.coordinator.handlePastedAttachments
-        if textView.string != text {
-            textView.string = text
+        if let replacement = context.coordinator.textSynchronization
+            .replacement(forBinding: text, nativeText: textView.string,
+                         isComposing: textView.hasMarkedText()) {
+            textView.string = replacement
             context.coordinator.resize()
         }
         if isFocused, textView.window?.firstResponder !== textView {
@@ -63,6 +65,7 @@ struct AutoGrowingTextEditor: NSViewRepresentable {
         var parent: AutoGrowingTextEditor
         weak var textView: NSTextView?
         weak var scrollView: NSScrollView?
+        var textSynchronization = NativeTextSynchronization()
 
         init(parent: AutoGrowingTextEditor) { self.parent = parent }
 
@@ -71,7 +74,14 @@ struct AutoGrowingTextEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
-            parent.text = textView.string
+            let shouldPublish = textSynchronization.nativeTextDidChange(
+                to: textView.string,
+                isComposing: textView.hasMarkedText()
+            )
+            // Do not expose transient Chinese/Japanese IME marked text to
+            // SwiftUI. The final committed candidate produces another change
+            // notification and is synchronized normally.
+            if shouldPublish { parent.text = textView.string }
             resize()
         }
 

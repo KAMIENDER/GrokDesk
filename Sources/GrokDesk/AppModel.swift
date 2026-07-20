@@ -796,20 +796,64 @@ final class AppModel: ObservableObject {
     }
 
     private func enqueueACPUpdate(method: String, params: [String: Any], conversationID: UUID) {
-        pendingACPUpdates[conversationID, default: []].append(.init(method: method, params: params))
+        let incoming = PendingACPUpdate(method: method, params: params)
+        if selectedConversationID != conversationID,
+           var buffered = pendingACPUpdates[conversationID],
+           let last = buffered.last,
+           let merged = coalescingStreamChunk(last, with: incoming) {
+            buffered[buffered.count - 1] = merged
+            pendingACPUpdates[conversationID] = buffered
+        } else {
+            pendingACPUpdates[conversationID, default: []].append(incoming)
+        }
+
+        // A background transcript is not visible. Keep its ordered ACP updates
+        // off the published conversation graph until the chat is selected or
+        // the turn finishes; otherwise every token invalidates the whole window
+        // and can interrupt text input in an unrelated session.
+        guard selectedConversationID == conversationID else { return }
         guard acpFlushTasks[conversationID] == nil else { return }
 
         // Keep the visible transcript fluid, while preventing a background
         // stream from forcing a full AppModel/SwiftUI diff for every token.
         // Each session owns a separate FIFO queue, so tool/thought/text order
         // is preserved exactly within that session.
-        let delay = selectedConversationID == conversationID ? 0.016 : 0.12
+        let delay = 0.016
         let task = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             self?.flushACPUpdates(for: conversationID)
         }
         acpFlushTasks[conversationID] = task
+    }
+
+    /// Combine adjacent background text/thought deltas without changing their
+    /// position relative to tools, hooks, plans, or other runtime events.
+    private func coalescingStreamChunk(_ older: PendingACPUpdate,
+                                       with newer: PendingACPUpdate) -> PendingACPUpdate? {
+        guard older.method == newer.method,
+              let olderUpdate = sessionUpdate(from: older.params),
+              var newerUpdate = sessionUpdate(from: newer.params),
+              let olderType = olderUpdate["sessionUpdate"] as? String,
+              olderType == newerUpdate["sessionUpdate"] as? String,
+              olderType == "agent_message_chunk" || olderType == "agent_thought_chunk" else { return nil }
+
+        let combined = contentText(olderUpdate) + contentText(newerUpdate)
+        if var content = newerUpdate["content"] as? [String: Any] {
+            guard (content["type"] as? String ?? "text") == "text" else { return nil }
+            content["text"] = combined
+            newerUpdate["content"] = content
+        } else {
+            newerUpdate["text"] = combined
+        }
+        var params = newer.params
+        if params["update"] != nil { params["update"] = newerUpdate }
+        else { params = newerUpdate }
+        return PendingACPUpdate(method: newer.method, params: params)
+    }
+
+    private func sessionUpdate(from params: [String: Any]) -> [String: Any]? {
+        (params["update"] as? [String: Any]) ?? (params["sessionUpdate"] != nil ? params : nil)
     }
 
     private func flushACPUpdates(for conversationID: UUID) {

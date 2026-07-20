@@ -283,6 +283,8 @@
 "Memory 写入完成" = "Memory written";
 "Runtime 正在重试" = "Runtime is retrying";
 "Session 回顾" = "Session recap";
+"加载更早消息（%@ 条）" = "Load earlier messages (%@)";
+"跳到最新消息" = "Jump to latest message";
 "auth.json 中没有可用登录令牌" = "No usable sign-in token was found in auth.json";
 "grok 路径" = "grok path";
 "上下文已自动压缩" = "Context auto-compacted";
