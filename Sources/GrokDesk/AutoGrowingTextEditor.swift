@@ -110,8 +110,43 @@ struct AutoGrowingTextEditor: NSViewRepresentable {
 private final class AttachmentTextView: NSTextView {
     var onPasteAttachments: ([URL]) -> Void = { _ in }
 
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        // A plain-text NSTextView considers an image-only pasteboard invalid,
+        // so AppKit may disable Paste before paste(_:) reaches this subclass.
+        // Advertise the attachment payload here while preserving native text
+        // validation for ordinary clipboard content.
+        if item.action == #selector(paste(_:)), hasPasteboardAttachments(NSPasteboard.general) {
+            return true
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.type == .keyDown,
+           modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v",
+           consumePasteboardAttachments(NSPasteboard.general) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func paste(_ sender: Any?) {
-        let pasteboard = NSPasteboard.general
+        if consumePasteboardAttachments(NSPasteboard.general) { return }
+        super.paste(sender)
+    }
+
+    private func hasPasteboardAttachments(_ pasteboard: NSPasteboard) -> Bool {
+        if pasteboard.canReadObject(forClasses: [NSURL.self],
+                                    options: [.urlReadingFileURLsOnly: true]) {
+            return true
+        }
+        return pasteboard.availableType(from: imagePasteboardTypes) != nil
+            || NSImage(pasteboard: pasteboard) != nil
+    }
+
+    private func consumePasteboardAttachments(_ pasteboard: NSPasteboard) -> Bool {
         // Finder exposes file selections as NSURL objects. Mapping explicitly
         // avoids relying on an NSArray -> [URL] conditional bridge, which can
         // fail even though the pasteboard contains valid file URLs.
@@ -120,7 +155,7 @@ private final class AttachmentTextView: NSTextView {
             .map { $0 as URL } ?? []
         if !urls.isEmpty {
             onPasteAttachments(urls)
-            return
+            return true
         }
 
         // Screenshot tools and browsers do not all advertise an NSImage-
@@ -132,23 +167,34 @@ private final class AttachmentTextView: NSTextView {
                                                         withIntermediateDirectories: true)
                 try attachment.data.write(to: attachment.url, options: .atomic)
                 onPasteAttachments([attachment.url])
-                return
-            } catch { NSSound.beep() }
+                return true
+            } catch {
+                NSSound.beep()
+                return true
+            }
         }
-        super.paste(sender)
+        return false
+    }
+
+    private var imagePasteboardTypes: [NSPasteboard.PasteboardType] {
+        [.png,
+         NSPasteboard.PasteboardType("public.jpeg"),
+         NSPasteboard.PasteboardType("public.heic"),
+         NSPasteboard.PasteboardType("public.webp"),
+         .tiff]
     }
 
     private func rawImageAttachment(from pasteboard: NSPasteboard) -> (url: URL, data: Data)? {
-        let candidates: [(type: NSPasteboard.PasteboardType, fileExtension: String)] = [
-            (.png, "png"),
-            (NSPasteboard.PasteboardType("public.jpeg"), "jpg"),
-            (NSPasteboard.PasteboardType("public.heic"), "heic"),
-            (NSPasteboard.PasteboardType("public.webp"), "webp"),
-            (.tiff, "tiff")
+        let fileExtensions = [
+            "png",
+            "jpg",
+            "heic",
+            "webp",
+            "tiff"
         ]
-        for candidate in candidates {
-            guard let data = pasteboard.data(forType: candidate.type), !data.isEmpty else { continue }
-            return (pastedImageURL(fileExtension: candidate.fileExtension), data)
+        for (type, fileExtension) in zip(imagePasteboardTypes, fileExtensions) {
+            guard let data = pasteboard.data(forType: type), !data.isEmpty else { continue }
+            return (pastedImageURL(fileExtension: fileExtension), data)
         }
         return nil
     }
