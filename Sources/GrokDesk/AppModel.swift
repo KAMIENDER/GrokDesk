@@ -11,6 +11,10 @@ final class AppModel: ObservableObject {
     @Published var settingsPage = "通用"
     @Published var workspaceMode: WorkspaceMode = .modern
     @Published var isRunning = false
+    /// GrokDesk currently owns one foreground turn at a time. Keep its
+    /// conversation identity separately so switching the sidebar selection
+    /// never moves the spinner, stop action, or interjection to another chat.
+    @Published private(set) var runningConversationID: UUID?
     @Published var isRefreshingQuota = false
     @Published var isAddingAccount = false
     @Published var statusText = "就绪"
@@ -47,6 +51,12 @@ final class AppModel: ObservableObject {
         accounts = state.accounts; conversations = state.conversations
         selectedConversationID = state.selectedConversationID; settings = state.settings
         hiddenProjectPaths = state.hiddenProjectPaths ?? []
+        // An unsent folder selection is not a completed conversation and must
+        // not survive an app relaunch as an extra empty sidebar session.
+        conversations.removeAll(where: \.isUnsentLocalDraft)
+        if !conversations.contains(where: { $0.id == selectedConversationID }) {
+            selectedConversationID = nil
+        }
         let defaultHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok", isDirectory: true)
         if FileManager.default.fileExists(atPath: defaultHome.appendingPathComponent("auth.json").path),
            !accounts.contains(where: { URL(fileURLWithPath: $0.homePath).standardizedFileURL == defaultHome.standardizedFileURL }) {
@@ -75,6 +85,14 @@ final class AppModel: ObservableObject {
     var selectedPlan: [PlanEntryRecord] { selectedConversationID.flatMap { plans[$0] } ?? [] }
     var selectedExtensionEvents: [(String, String)] { selectedConversationID.flatMap { extensionEvents[$0] } ?? [] }
     var selectedContextUsage: ContextUsage? { selectedConversationID.flatMap { contextUsage[$0] } }
+    var selectedConversationIsRunning: Bool {
+        guard let selectedConversationID else { return false }
+        return isConversationRunning(selectedConversationID)
+    }
+
+    func isConversationRunning(_ id: UUID) -> Bool {
+        isRunning && runningConversationID == id
+    }
 
     func persist() {
         try? StateStore.save(PersistedState(accounts: accounts, conversations: conversations,
@@ -128,12 +146,19 @@ final class AppModel: ObservableObject {
     }
 
     func syncLocalSessions() {
+        let summaries = LocalSessionIndex.summaries()
         let known = Set(conversations.compactMap(\.grokSessionID))
-        conversations.append(contentsOf: LocalSessionIndex.summaries().filter { session in
-            guard let id = session.grokSessionID else { return false }
-            return !known.contains(id)
+        conversations.append(contentsOf: summaries.filter { session in
+            session.grokSessionID.map { !known.contains($0) } ?? false
         })
+        for summary in summaries {
+            guard let sessionID = summary.grokSessionID,
+                  let index = conversations.firstIndex(where: { $0.grokSessionID == sessionID }) else { continue }
+            conversations[index].updatedAt = max(conversations[index].updatedAt, summary.updatedAt)
+            if conversations[index].title == "Grok Session" { conversations[index].title = summary.title }
+        }
         conversations.sort { $0.updatedAt > $1.updatedAt }
+        if let selectedConversationID { loadHistoryIfNeeded(selectedConversationID) }
         persist()
     }
 
@@ -146,8 +171,12 @@ final class AppModel: ObservableObject {
         contextUsage[conversationID] = LocalSessionIndex.contextUsage(
             sessionID: sessionID, fallbackTotal: settings.effectiveContextWindowTokens
         )
-        guard conversations[index].messages.isEmpty else { return }
-        conversations[index].messages = LocalSessionIndex.messages(sessionID: sessionID)
+        let external = LocalSessionIndex.messages(sessionID: sessionID)
+        let merged = LocalSessionIndex.reconcile(local: conversations[index].messages, external: external)
+        guard merged != conversations[index].messages else { return }
+        conversations[index].messages = merged
+        conversations[index].updatedAt = Date()
+        persist()
     }
 
     /// User-created conversations always begin with an explicit workspace choice.
@@ -172,6 +201,10 @@ final class AppModel: ObservableObject {
     }
 
     private func createConversation(account: GrokAccount? = nil, cwd: String? = nil) {
+        // Keep at most one transient composer draft. Choosing New Chat again
+        // abandons the previous unsent folder selection instead of creating a
+        // stack of empty conversations in persisted state.
+        conversations.removeAll(where: \.isUnsentLocalDraft)
         var conversation = Conversation(cwd: cwd ?? settings.defaultWorkingDirectory)
         conversation.title = L10n.text("新对话", language: settings.effectiveLanguage)
         conversation.accountID = account?.id
@@ -360,13 +393,17 @@ final class AppModel: ObservableObject {
     func refreshQuotas() async {
         isRefreshingQuota = true
         let candidates = accounts.filter { $0.enabled && $0.isLoggedIn }
+        var failedCount = 0
         await withTaskGroup(of: (UUID, QuotaSnapshot).self) { group in
             for account in candidates { group.addTask { (account.id, await QuotaService.fetch(account: account)) } }
             for await (id, quota) in group {
+                if quota.error != nil { failedCount += 1 }
                 if let index = accounts.firstIndex(where: { $0.id == id }) { accounts[index].quota = quota }
             }
         }
-        isRefreshingQuota = false; statusText = "额度已刷新"; persist()
+        isRefreshingQuota = false
+        statusText = failedCount == 0 ? "额度已刷新" : "\(failedCount) 个账号额度刷新失败"
+        persist()
     }
 
     func routeAccount(excluding excluded: Set<UUID> = []) -> GrokAccount? {
@@ -402,7 +439,11 @@ final class AppModel: ObservableObject {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty,
               selectedConversationIndex != nil else { return }
         if isRunning {
-            interject(prompt)
+            if selectedConversationID == runningConversationID {
+                interject(prompt)
+            } else {
+                statusText = "另一个会话正在运行，请切回该会话追加或停止"
+            }
             return
         }
         Task {
@@ -446,7 +487,9 @@ final class AppModel: ObservableObject {
     }
 
     private func prepareTurn(_ prompt: String, attachments: [URL] = [], index: Int) -> UUID {
-        isRunning = true; statusText = "正在连接 Grok Agent"
+        isRunning = true
+        runningConversationID = conversations[index].id
+        statusText = "正在连接 Grok Agent"
         let media = attachments.map { url -> MessageMedia in
             if NSImage(contentsOf: url) != nil {
                 // Keep only the durable local URL in chat state; ACP performs
@@ -462,6 +505,64 @@ final class AppModel: ObservableObject {
             conversations[index].title = prompt.isEmpty ? (attachments.first?.lastPathComponent ?? "附件对话") : String(prompt.prefix(28))
         }
         persist(); return conversations[index].id
+    }
+
+    /// Replays the most recent user turn without duplicating its bubble. Any
+    /// partial assistant output and the terminal error card are replaced by a
+    /// fresh assistant stream, matching the usual "regenerate" interaction.
+    func regenerateLastResponse() {
+        guard !isRunning, let index = selectedConversationIndex,
+              let userIndex = conversations[index].messages.lastIndex(where: { $0.role == .user }) else {
+            statusText = isRunning ? "请先等待当前运行结束" : "没有可重新生成的消息"
+            return
+        }
+        let userMessage = conversations[index].messages[userIndex]
+        let attachments = userMessage.media?.compactMap { media in
+            media.uri.flatMap(URL.init(string:))
+        } ?? []
+
+        let preferred = conversations[index].accountID.flatMap { id in
+            accounts.first { $0.id == id && $0.enabled && $0.isLoggedIn }
+        }
+        guard let account = preferred ?? accountForNextTurn() else {
+            statusText = "没有已登录且启用的账号"
+            showAccountSettings()
+            return
+        }
+        conversations[index].messages.removeSubrange((userIndex + 1)..<conversations[index].messages.endIndex)
+        conversations[index].accountID = account.id
+        beginRegeneratedTurn(userMessage.text, attachments: attachments, account: account, index: index)
+    }
+
+    private func beginRegeneratedTurn(_ prompt: String, attachments: [URL], account: GrokAccount, index: Int) {
+        let conversationID = conversations[index].id
+        isRunning = true
+        runningConversationID = conversationID
+        statusText = "正在重新生成"
+        conversations[index].messages.append(ChatMessage(role: .assistant, text: "", isStreaming: true))
+        conversations[index].updatedAt = Date()
+        persist()
+
+        if workspaceMode == .modern {
+            if let runtime = runtimes[conversationID], runtime.accountID == account.id {
+                promptACP(prompt, attachments: attachments, runtime: runtime, conversationID: conversationID)
+            } else {
+                runtimes.removeValue(forKey: conversationID)?.stop()
+                connectACP(prompt: prompt, attachments: attachments, conversationID: conversationID,
+                           account: account, excluded: [])
+            }
+        } else {
+            let snapshot = conversations[index]
+            cli.runChat(binary: settings.grokBinary, account: account, conversation: snapshot,
+                        prompt: prompt, settings: settings,
+                        onText: { [weak self] in self?.append(text: $0, thought: false, conversationID: conversationID) },
+                        onThought: { [weak self] in self?.append(text: $0, thought: true, conversationID: conversationID) },
+                        onDiagnostic: { [weak self] in self?.statusText = $0 }) { [weak self] result in
+                guard let self else { return }
+                if case .failure(let error) = result { self.finish(conversationID, error: error) }
+                else { self.finish(conversationID) }
+            }
+        }
     }
 
     private func sendACP(_ prompt: String, attachments: [URL], account: GrokAccount, index: Int) {
@@ -878,6 +979,11 @@ final class AppModel: ObservableObject {
         // the UI cannot silently discard a new Grok capability it does not know yet.
         guard method != "user_message_chunk", method != "user_message" else { return }
         let kind = extensionKind(method)
+        // Low-level session/model/queue lifecycle notifications remain in the
+        // Run Details inspector but do not belong in the user-facing process
+        // timeline. This also keeps future unknown runtime churn from creating
+        // a row between every meaningful action.
+        guard kind != "system" else { return }
         upsertTimelineEvent(.init(id: "extension-\(eventID ?? UUID().uuidString)", kind: kind,
                                   title: extensionTitle(method, params: params), status: extensionStatus(params),
                                   input: nil, output: jsonText(params)), conversationID: conversationID)
@@ -887,7 +993,8 @@ final class AppModel: ObservableObject {
         let value = method.lowercased()
         if value.contains("hook") { return "hook" }
         if value.contains("skill") || value.contains("plugin") { return "skill" }
-        if value.contains("memory") || value.contains("compact") || value.contains("retry") || value.contains("session") || value.contains("turn_") { return "system" }
+        if value.contains("memory") || value.contains("compact") { return "context" }
+        if value.contains("retry") || value.contains("session") || value.contains("turn_") { return "system" }
         if value.contains("task") { return "background_task" }
         return "extension"
     }
@@ -929,11 +1036,18 @@ final class AppModel: ObservableObject {
 
     private func finish(_ conversationID: UUID, error: Error? = nil) {
         if cancelledConversationIDs.remove(conversationID) != nil {
+            if runningConversationID == conversationID {
+                isRunning = false
+                runningConversationID = nil
+            }
             statusText = "已停止"
             persist()
             return
         }
-        isRunning = false
+        if runningConversationID == conversationID {
+            isRunning = false
+            runningConversationID = nil
+        }
         guard let c = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
         if let m = conversations[c].messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) {
             conversations[c].messages[m].isStreaming = false
@@ -943,7 +1057,13 @@ final class AppModel: ObservableObject {
                 conversations[c].messages.remove(at: m)
             }
         }
-        if let error { conversations[c].messages.append(ChatMessage(role: .system, text: "运行失败：\(error.localizedDescription)")); statusText = "运行失败" }
+        if let error {
+            let detail = error.localizedDescription == "Internal error"
+                ? "Grok Build 返回内部错误（Internal error）"
+                : error.localizedDescription
+            conversations[c].messages.append(ChatMessage(role: .system, text: "运行失败：\(detail)"))
+            statusText = "运行失败"
+        }
         else { statusText = "完成" }
         persist(); Task { await refreshQuotas() }
     }
@@ -957,19 +1077,7 @@ final class AppModel: ObservableObject {
             upsertTimelineEvent(.init(id: "thought", kind: "thought", title: "思考过程", status: nil,
                                       input: nil, output: value), conversationID: conversationID)
         }
-        else {
-            var chunk = text
-            let existing = conversations[c].messages[m].text
-            // ACP may emit a progress sentence and then begin the final answer with a
-            // Markdown block in the next chunk. Keep the block on its own line so a
-            // heading/list cannot be merged into the preceding sentence while streaming.
-            if !existing.isEmpty,
-               !existing.hasSuffix("\n"),
-               MarkdownStreamBoundary.startsBlock(chunk) {
-                chunk = "\n\n" + chunk
-            }
-            conversations[c].messages[m].text += chunk
-        }
+        else { conversations[c].messages[m].text += text }
     }
 
     private func sendHeadless(_ prompt: String, account: GrokAccount, index: Int) {
@@ -983,7 +1091,7 @@ final class AppModel: ObservableObject {
     }
 
     func cancel() {
-        guard let id = selectedConversationID else { return }
+        guard let id = runningConversationID else { return }
         cancelledConversationIDs.insert(id)
         if let index = conversations.firstIndex(where: { $0.id == id }) {
             if let streaming = conversations[index].messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) {
@@ -998,6 +1106,7 @@ final class AppModel: ObservableObject {
             conversations[index].updatedAt = Date()
         }
         isRunning = false
+        runningConversationID = nil
         statusText = "已停止"
         if let runtime = runtimes[id] { runtime.cancel() } else { cli.cancel() }
         persist()
@@ -1018,24 +1127,5 @@ final class AppModel: ObservableObject {
 
     func addAttachments(_ urls: [URL]) {
         pendingAttachments.append(contentsOf: urls.filter { !pendingAttachments.contains($0) })
-    }
-}
-
-private enum MarkdownStreamBoundary {
-    static func startsBlock(_ chunk: String) -> Bool {
-        let value = chunk.drop(while: { $0 == " " || $0 == "\t" })
-        guard !value.isEmpty else { return false }
-        if value.hasPrefix("```") || value.hasPrefix("> ") || value.hasPrefix("---") { return true }
-        if value.hasPrefix("- ") || value.hasPrefix("* ") || value.hasPrefix("+ ") { return true }
-        if value.first == "#" {
-            let hashes = value.prefix(while: { $0 == "#" }).count
-            return (1...6).contains(hashes) && value.dropFirst(hashes).first == " "
-        }
-        var digits = 0
-        for character in value {
-            if character.isNumber { digits += 1; continue }
-            return digits > 0 && character == "." && value.dropFirst(digits + 1).first == " "
-        }
-        return false
     }
 }

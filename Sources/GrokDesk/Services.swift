@@ -201,6 +201,52 @@ enum LocalSessionIndex {
         return result
     }
 
+    /// Merges turns written by the native Grok CLI into GrokDesk's richer
+    /// local transcript. The last common user turn is the anchor: only content
+    /// after that point may change, so older tool timelines and message IDs are
+    /// preserved while externally continued turns become visible.
+    static func reconcile(local: [ChatMessage], external: [ChatMessage]) -> [ChatMessage] {
+        guard !external.isEmpty else { return local }
+        guard !local.isEmpty else { return external }
+
+        for localUserIndex in local.indices.reversed() where local[localUserIndex].role == .user {
+            let query = normalized(local[localUserIndex].text)
+            guard let externalUserIndex = external.lastIndex(where: {
+                $0.role == .user && normalized($0.text) == query
+            }) else { continue }
+
+            let localTail = Array(local.dropFirst(localUserIndex + 1))
+            let externalTail = Array(external.dropFirst(externalUserIndex + 1))
+            guard hasExternalProgress(localTail: localTail, externalTail: externalTail) else { return local }
+
+            var merged = Array(local.prefix(localUserIndex + 1))
+            var externalStart = 0
+            if let localAssistant = localTail.first(where: { $0.role == .assistant }),
+               let firstExternalAssistantIndex = externalTail.firstIndex(where: { $0.role == .assistant }) {
+                var assistant = localAssistant
+                assistant.text = externalTail[firstExternalAssistantIndex].text
+                assistant.isStreaming = false
+                merged.append(assistant)
+                externalStart = firstExternalAssistantIndex + 1
+            }
+            merged.append(contentsOf: externalTail.dropFirst(externalStart))
+            return merged
+        }
+        return local
+    }
+
+    private static func hasExternalProgress(localTail: [ChatMessage], externalTail: [ChatMessage]) -> Bool {
+        if externalTail.contains(where: { $0.role == .user }) { return true }
+        guard let externalAssistant = externalTail.first(where: { $0.role == .assistant }) else { return false }
+        let localAssistantText = localTail.first(where: { $0.role == .assistant })?.text ?? ""
+        return externalAssistant.text.count > localAssistantText.count
+            && externalAssistant.text.hasPrefix(localAssistantText)
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func contextUsage(sessionID: String, fallbackTotal: Int) -> ContextUsage? {
         guard let enumerator = FileManager.default.enumerator(at: sessionsRoot, includingPropertiesForKeys: nil) else { return nil }
         for case let url as URL in enumerator where url.lastPathComponent == sessionID {

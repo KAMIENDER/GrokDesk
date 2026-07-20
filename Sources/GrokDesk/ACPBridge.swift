@@ -210,7 +210,13 @@ final class ACPBridge {
                 let id = String(describing: idValue)
                 guard let callback = self.callbacks.removeValue(forKey: id) else { return }
                 if let error = json["error"] as? JSONObject {
-                    callback(.failure(Self.error(error["message"] as? String ?? "ACP 请求失败")))
+                    let message = error["message"] as? String ?? "ACP 请求失败"
+                    let code = error["code"].map { String(describing: $0) }
+                    let data = error["data"].map { String(describing: $0) }
+                    let diagnostic = [code.map { "code=\($0)" }, data.map { "data=\($0)" }]
+                        .compactMap { $0 }.joined(separator: ", ")
+                    if !diagnostic.isEmpty { self.onDiagnostic?("ACP 错误：\(message)（\(diagnostic)）") }
+                    callback(.failure(Self.error(message)))
                 } else if let object = json["result"] as? JSONObject { callback(.success(object)) }
                 else { callback(.success(["_value": json["result"] ?? NSNull()])) }
                 return

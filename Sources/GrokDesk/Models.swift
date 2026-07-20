@@ -83,6 +83,19 @@ struct Conversation: Identifiable, Codable, Hashable {
     var createdAt = Date()
     var updatedAt = Date()
     var archivedAt: Date?
+
+    /// A folder choice is only a draft. The conversation becomes a sidebar
+    /// item after its first user turn is sent. Imported CLI sessions with a
+    /// generated title are already completed conversations even before their
+    /// transcript is lazily loaded by GrokDesk.
+    var isReadyForSidebar: Bool {
+        if messages.contains(where: { $0.role == .user }) { return true }
+        return grokSessionID != nil && title != "Grok Session"
+    }
+
+    var isUnsentLocalDraft: Bool {
+        grokSessionID == nil && !messages.contains(where: { $0.role == .user })
+    }
 }
 
 struct AppSettings: Codable, Hashable {

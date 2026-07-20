@@ -31,6 +31,7 @@ enum L10n {
         "额度待刷新": "Usage pending", "选择项目": "Choose project",
         "运行详情": "Run details", "过程": "Process", "思考过程": "Reasoning",
         "Skills 与扩展": "Skills & extensions", "文件与搜索": "Files & search",
+        "上下文与记忆": "Context & memory",
         "命令与任务": "Commands & tasks", "执行计划": "Plan",
         "权限与交互": "Permissions & interactions", "运行与系统": "Runtime & system",
         "其他操作": "Other activity", "输入": "Input", "内容": "Content", "结果": "Result",

@@ -64,6 +64,11 @@ struct ContentView: View {
             }
         }
         .onChange(of: model.settings) { _, _ in model.persist() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Native Grok CLI may continue a shared session while GrokDesk is
+            // in the background. Reconcile its new turns when the app returns.
+            model.syncLocalSessions()
+        }
         .sheet(item: $model.pendingPermission) { PermissionSheet(permission: $0) }
         .sheet(item: $model.pendingQuestion) { QuestionSheet(request: $0) }
         .sheet(item: $model.pendingPlanApproval) { PlanApprovalSheet(request: $0) }
@@ -201,7 +206,9 @@ struct AppSidebar: View {
 
     private var projects: [ConversationProject] {
         Dictionary(grouping: model.conversations.filter {
-            $0.archivedAt == nil && !model.hiddenProjectPaths.contains($0.cwd)
+            $0.archivedAt == nil
+                && $0.isReadyForSidebar
+                && !model.hiddenProjectPaths.contains($0.cwd)
         }, by: \.cwd)
             .map { ConversationProject(path: $0.key, conversations: $0.value.sorted { $0.updatedAt > $1.updatedAt }) }
             .sorted { ($0.conversations.first?.updatedAt ?? .distantPast) > ($1.conversations.first?.updatedAt ?? .distantPast) }
@@ -252,7 +259,7 @@ struct AppSidebar: View {
                                     HStack(spacing: 8) {
                                         Text(conversation.title).lineLimit(1)
                                         Spacer(minLength: 2)
-                                        if conversation.id == model.selectedConversationID && model.isRunning {
+                                        if model.isConversationRunning(conversation.id) {
                                             ProgressView().controlSize(.mini)
                                         }
                                     }
@@ -527,7 +534,7 @@ struct ChatHeader: View {
             Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
             Text(model.selectedConversation?.title ?? L10n.text("新对话", language: model.settings.effectiveLanguage)).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
-            if model.isRunning {
+            if model.selectedConversationIsRunning {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text(L10n.text(model.statusText, language: model.settings.effectiveLanguage))
@@ -589,7 +596,7 @@ struct ComposerView: View {
                 Spacer()
                 ContextUsageIndicator()
                 ReasoningEffortMenu()
-                if model.isRunning && !canSend {
+                if model.selectedConversationIsRunning && !canSend {
                     Button(action: model.cancel) {
                         Image(systemName: "stop.fill")
                             .font(.system(size: 8, weight: .bold))
@@ -606,7 +613,7 @@ struct ComposerView: View {
                             .foregroundStyle(canSend ? Color(nsColor: .controlBackgroundColor) : Color.secondary.opacity(0.55))
                     }
                     .buttonStyle(.plain).disabled(!canSend)
-                    .help(model.isRunning ? "追加到当前运行" : "发送（Return）")
+                    .help(model.selectedConversationIsRunning ? "追加到当前运行" : "发送（Return）")
                 }
             }
         }
@@ -875,6 +882,7 @@ struct PermissionModeMenu: View {
 }
 
 struct MessageRow: View {
+    @EnvironmentObject private var model: AppModel
     let message: ChatMessage
     var body: some View {
         switch message.role {
@@ -883,8 +891,16 @@ struct MessageRow: View {
         case .assistant:
             messageContent.frame(maxWidth: .infinity, alignment: .leading)
         case .system:
-            Label { messageContent } icon: { Image(systemName: "exclamationmark.circle") }
-                .foregroundStyle(.red).padding(12).background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+            HStack(spacing: 12) {
+                Label { messageContent } icon: { Image(systemName: "exclamationmark.circle") }
+                Spacer(minLength: 8)
+                if message.text.hasPrefix("运行失败：") {
+                    Button("重新生成", action: model.regenerateLastResponse)
+                        .buttonStyle(.bordered)
+                        .disabled(model.isRunning)
+                }
+            }
+            .foregroundStyle(.red).padding(12).background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
         case .status:
             Label(message.text, systemImage: "stop.circle")
                 .font(GrokTypography.metadata).foregroundStyle(.secondary)
@@ -908,7 +924,7 @@ struct MessageRow: View {
 }
 
 private enum ActivityCategory: Int, CaseIterable, Identifiable {
-    case reasoning, skills, files, commands, hooks, plan, interactions, system, other
+    case reasoning, skills, files, commands, hooks, context, plan, interactions, system, other
     var id: Int { rawValue }
     var title: String {
         switch self {
@@ -917,6 +933,7 @@ private enum ActivityCategory: Int, CaseIterable, Identifiable {
         case .files: return "文件与搜索"
         case .commands: return "命令与任务"
         case .hooks: return "Hooks"
+        case .context: return "上下文与记忆"
         case .plan: return "执行计划"
         case .interactions: return "权限与交互"
         case .system: return "运行与系统"
@@ -930,6 +947,7 @@ private enum ActivityCategory: Int, CaseIterable, Identifiable {
         case .files: return "doc.text.magnifyingglass"
         case .commands: return "terminal"
         case .hooks: return "arrow.triangle.branch"
+        case .context: return "arrow.triangle.2.circlepath"
         case .plan: return "checklist"
         case .interactions: return "hand.raised"
         case .system: return "waveform.path.ecg"
@@ -944,6 +962,7 @@ private enum ActivityCategory: Int, CaseIterable, Identifiable {
         if haystack.contains("skill") || haystack.contains("plugin") || haystack.contains("/skills/") { return .skills }
         if event.kind == "thought" { return .reasoning }
         if event.kind == "plan" { return .plan }
+        if event.kind == "context" || haystack.contains("compact") || haystack.contains("memory") { return .context }
         if ["permission", "question", "interaction"].contains(where: haystack.contains) { return .interactions }
         if ["read", "write", "edit", "search", "list", "file", "fetch"].contains(where: haystack.contains) { return .files }
         if ["execute", "command", "shell", "bash", "terminal", "background_task", "task_"].contains(where: haystack.contains) { return .commands }
@@ -956,11 +975,18 @@ private struct ActivityTimeline: View {
     let events: [ChatTimelineEvent]
     @State private var expanded = false
 
+    /// Runtime lifecycle noise is still available in the inspector's raw ACP
+    /// event stream. The conversation timeline only contains user-relevant
+    /// actions and state transitions.
+    private var visibleEvents: [ChatTimelineEvent] {
+        events.filter { ActivityCategory.category(for: $0) != .system }
+    }
+
     /// Preserve ACP arrival order. Only consecutive events of the same category
     /// share a disclosure group; a later return to that category starts a new run.
     private var runs: [ActivityRun] {
         var result: [ActivityRun] = []
-        for event in events {
+        for event in visibleEvents {
             let category = ActivityCategory.category(for: event)
             if let lastIndex = result.indices.last, result[lastIndex].category == category {
                 result[lastIndex].events.append(event)
@@ -972,22 +998,52 @@ private struct ActivityTimeline: View {
     }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(runs) { run in
-                    ActivityCategoryGroup(category: run.category, events: run.events)
+        if !visibleEvents.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                TimelineDisclosureButton(isExpanded: $expanded) {
+                    Image(systemName: "brain.head.profile").frame(width: 16)
+                    Text("过程")
+                    Text("\(visibleEvents.count)").font(GrokTypography.metadata).foregroundStyle(.tertiary)
+                }
+                .font(GrokTypography.item(.medium))
+                if expanded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(runs) { run in
+                            ActivityCategoryGroup(category: run.category, events: run.events)
+                        }
+                    }
+                    .padding(.top, 8).padding(.leading, 20)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
-            .padding(.top, 8).padding(.leading, 20)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "brain.head.profile").frame(width: 16)
-                Text("过程")
-                Text("\(events.count)").font(GrokTypography.metadata).foregroundStyle(.tertiary)
-            }
-            .font(GrokTypography.item(.medium)).contentShape(Rectangle())
+            .foregroundStyle(.secondary)
         }
-        .foregroundStyle(.secondary)
+    }
+}
+
+/// `DisclosureGroup` on macOS may leave only its chevron reliably clickable.
+/// This control makes the complete visible row toggle its nested content.
+private struct TimelineDisclosureButton<Label: View>: View {
+    @Binding var isExpanded: Bool
+    @ViewBuilder let label: () -> Label
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 12)
+                label()
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(isExpanded ? "已展开" : "已折叠")
     }
 }
 
@@ -1003,18 +1059,20 @@ private struct ActivityCategoryGroup: View {
     @State private var expanded = false
 
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(events) { TimelineEventRow(event: $0) }
-            }
-            .padding(.top, 8).padding(.leading, 20)
-        } label: {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
+            TimelineDisclosureButton(isExpanded: $expanded) {
                 Image(systemName: category.icon).frame(width: 16)
                 Text(LocalizedStringKey(category.title))
                 Text("\(events.count)").font(GrokTypography.metadata).foregroundStyle(.tertiary)
             }
-            .font(GrokTypography.item(.medium)).contentShape(Rectangle())
+            .font(GrokTypography.item(.medium))
+            if expanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(events) { TimelineEventRow(event: $0) }
+                }
+                .padding(.top, 8).padding(.leading, 20)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .foregroundStyle(.secondary)
     }
@@ -1026,26 +1084,27 @@ private struct TimelineEventRow: View {
     @State private var expanded = false
 
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                if let input = event.input, !input.isEmpty {
-                    eventDetail(title: "输入", value: input)
-                }
-                if let output = event.output, !output.isEmpty {
-                    if event.kind == "thought" { MarkdownText(text: output).foregroundStyle(.secondary) }
-                    else { eventDetail(title: event.kind == "plan" ? "内容" : "结果", value: output) }
-                }
-            }
-            .padding(.top, 7).padding(.leading, 2)
-        } label: {
-            HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 0) {
+            TimelineDisclosureButton(isExpanded: $expanded) {
                 Image(systemName: icon).frame(width: 13)
                 Text(L10n.text(event.title, language: locale.identifier.hasPrefix("en") ? "en" : "zh-Hans")).lineLimit(1)
                 if let status = event.status, !status.isEmpty {
                     Text(LocalizedStringKey(statusLabel(status))).foregroundStyle(statusColor(status))
                 }
             }
-            .contentShape(Rectangle())
+            if expanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let input = event.input, !input.isEmpty {
+                        eventDetail(title: "输入", value: input)
+                    }
+                    if let output = event.output, !output.isEmpty {
+                        if event.kind == "thought" { MarkdownText(text: output).foregroundStyle(.secondary) }
+                        else { eventDetail(title: event.kind == "plan" ? "内容" : "结果", value: output) }
+                    }
+                }
+                .padding(.top, 7).padding(.leading, 2)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .font(GrokTypography.item).foregroundStyle(.secondary)
     }
@@ -1323,6 +1382,14 @@ private struct UsageCard: View {
                                     Text("\(remaining, specifier: "%.0f")%")
                                 }.font(GrokTypography.metadata)
                                 ProgressView(value: remaining, total: 100).tint(.primary)
+                            } else if let error = account.quota?.error {
+                                VStack(alignment: .leading, spacing: 7) {
+                                    Text(error).font(GrokTypography.metadata).foregroundStyle(.red)
+                                    if account.isLoggedIn {
+                                        Button("重新登录") { model.login(account) }
+                                            .buttonStyle(.bordered).controlSize(.small)
+                                    }
+                                }
                             } else {
                                 Text(account.isLoggedIn ? "额度待刷新" : "尚未登录")
                                     .font(GrokTypography.metadata).foregroundStyle(.secondary)
@@ -1344,7 +1411,14 @@ private struct UsageCard: View {
                 }
                 Spacer()
                 Button { Task { await model.refreshQuotas() } } label: {
-                    Label("刷新额度", systemImage: "arrow.clockwise")
+                    if model.isRefreshingQuota {
+                        HStack(spacing: 7) {
+                            ProgressView().controlSize(.small)
+                            Text("正在刷新…")
+                        }
+                    } else {
+                        Label("刷新额度", systemImage: "arrow.clockwise")
+                    }
                 }
                 .buttonStyle(.borderedProminent).disabled(model.isRefreshingQuota)
             }
@@ -1393,7 +1467,12 @@ struct AccountCard: View {
                     HStack { Text("本周剩余").foregroundStyle(.secondary); Spacer(); Text("\(remaining, specifier: "%.1f")%").fontWeight(.semibold) }.font(GrokTypography.metadata)
                     ProgressView(value: remaining, total: 100).tint(remaining > 30 ? .green : .orange)
                 }
-            } else { Text(account.isLoggedIn ? "登录成功，等待刷新额度" : "尚未登录").font(GrokTypography.metadata).foregroundStyle(.secondary) }
+            } else if let error = account.quota?.error {
+                Text(error).font(GrokTypography.metadata).foregroundStyle(.red)
+            } else {
+                Text(account.isLoggedIn ? "登录成功，等待刷新额度" : "尚未登录")
+                    .font(GrokTypography.metadata).foregroundStyle(.secondary)
+            }
             HStack {
                 Button(account.isLoggedIn ? "重新登录" : "登录") { model.login(account) }
                 if account.isLoggedIn { Button("开始对话") { model.openAccount(account) } }
@@ -1603,16 +1682,27 @@ private struct MarkdownBlock: Identifiable {
                 result.append(MarkdownBlock(content: .table(rows)))
                 continue
             }
+            if lines[index].contains("|"),
+               let rowStart = fragmentedTableRowStart(lines, headerIndex: index) {
+                flush()
+                var rows = [tableCells(lines[index])]
+                index = rowStart
+                while index < lines.count, lines[index].contains("|") {
+                    rows.append(tableCells(lines[index])); index += 1
+                }
+                result.append(MarkdownBlock(content: .table(rows)))
+                continue
+            }
 
             let line = lines[index]
             if line.trimmingCharacters(in: .whitespaces).isEmpty { flush(); index += 1; continue }
+            if let heading = heading(line) {
+                flush(); result.append(MarkdownBlock(content: .heading(heading.level, heading.title)))
+                index += 1; continue
+            }
             if let embedded = splitEmbeddedHeading(line) {
                 prose.append(embedded.prefix); flush()
                 result.append(MarkdownBlock(content: .heading(embedded.level, embedded.title)))
-                index += 1; continue
-            }
-            if let heading = heading(line) {
-                flush(); result.append(MarkdownBlock(content: .heading(heading.level, heading.title)))
                 index += 1; continue
             }
             if isDivider(line) {
@@ -1650,6 +1740,7 @@ private struct MarkdownBlock: Identifiable {
         for level in (1...6).reversed() {
             let marker = String(repeating: "#", count: level) + " "
             guard let range = line.range(of: marker), range.lowerBound != line.startIndex else { continue }
+            guard line[line.index(before: range.lowerBound)] != "#" else { continue }
             let prefix = String(line[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
             guard !prefix.isEmpty, prefix.last?.isPunctuation == true else { continue }
             return (prefix, level, String(line[range.upperBound...]))
@@ -1679,6 +1770,25 @@ private struct MarkdownBlock: Identifiable {
     private static func quoteLine(_ line: String) -> String? {
         let value = line.trimmingCharacters(in: .whitespaces)
         return value.hasPrefix("> ") ? String(value.dropFirst(2)) : nil
+    }
+
+    private static func fragmentedTableRowStart(_ lines: [String], headerIndex: Int) -> Int? {
+        let expectedColumns = tableCells(lines[headerIndex]).count
+        guard expectedColumns > 0, headerIndex + 1 < lines.count,
+              lines[headerIndex + 1].trimmingCharacters(in: .whitespaces) == "|" else { return nil }
+        var index = headerIndex + 2, separatorColumns = 0
+        while index < lines.count, separatorColumns < expectedColumns {
+            let value = lines[index].trimmingCharacters(in: .whitespaces)
+            if value.isEmpty { index += 1; continue }
+            var fragment = value
+            if fragment.hasSuffix("|") { fragment.removeLast() }
+            fragment = fragment.replacingOccurrences(of: ":", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            guard fragment.count >= 3, fragment.allSatisfy({ $0 == "-" }) else { return nil }
+            separatorColumns += 1; index += 1
+        }
+        while index < lines.count, lines[index].trimmingCharacters(in: .whitespaces).isEmpty { index += 1 }
+        return separatorColumns == expectedColumns ? index : nil
     }
 
     private static func isTableSeparator(_ line: String) -> Bool {
