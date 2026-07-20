@@ -5,16 +5,23 @@ import Foundation
 final class AppModel: ObservableObject {
     @Published var accounts: [GrokAccount]
     @Published var conversations: [Conversation]
-    @Published var selectedConversationID: UUID?
+    @Published var selectedConversationID: UUID? {
+        didSet {
+            guard selectedConversationID != oldValue, let selectedConversationID else { return }
+            // A background session is refreshed at a lower cadence. Flush it
+            // immediately when the user opens that chat so its transcript is
+            // current before SwiftUI renders the newly selected conversation.
+            flushACPUpdates(for: selectedConversationID)
+        }
+    }
     @Published var settings: AppSettings
     @Published var sidebarSection: SidebarSection = .chat
     @Published var settingsPage = "通用"
     @Published var workspaceMode: WorkspaceMode = .modern
-    @Published var isRunning = false
-    /// GrokDesk currently owns one foreground turn at a time. Keep its
-    /// conversation identity separately so switching the sidebar selection
-    /// never moves the spinner, stop action, or interjection to another chat.
-    @Published private(set) var runningConversationID: UUID?
+    /// Every conversation owns its own turn lifecycle. ACP runtimes are already
+    /// isolated by conversation, so the UI state must preserve that same
+    /// boundary instead of globally blocking unrelated chats.
+    @Published private(set) var runningConversationIDs: Set<UUID> = []
     @Published var isRefreshingQuota = false
     @Published var isAddingAccount = false
     @Published var statusText = "就绪"
@@ -42,8 +49,23 @@ final class AppModel: ObservableObject {
     private let cli = CLIProcessService()
     private let runtimeInstaller = GrokRuntimeInstaller()
     private var runtimes: [UUID: ACPBridge] = [:]
+    private var headlessProcesses: [UUID: CLIProcessService] = [:]
     private var lastRoundRobinAccountID: UUID?
     private var cancelledConversationIDs: Set<UUID> = []
+    private struct PendingACPUpdate {
+        let method: String
+        let params: [String: Any]
+    }
+    private var pendingACPUpdates: [UUID: [PendingACPUpdate]] = [:]
+    private var acpFlushTasks: [UUID: Task<Void, Never>] = [:]
+
+    private func localized(_ key: String) -> String {
+        L10n.text(key, language: settings.effectiveLanguage)
+    }
+
+    private func localizedFormat(_ key: String, _ arguments: CVarArg...) -> String {
+        String(format: localized(key), locale: settings.appLocale, arguments: arguments)
+    }
 
     init() {
         try? AppPaths.prepare()
@@ -89,9 +111,19 @@ final class AppModel: ObservableObject {
         guard let selectedConversationID else { return false }
         return isConversationRunning(selectedConversationID)
     }
+    var isRunning: Bool { !runningConversationIDs.isEmpty }
 
     func isConversationRunning(_ id: UUID) -> Bool {
-        isRunning && runningConversationID == id
+        runningConversationIDs.contains(id)
+    }
+
+    private func markConversationRunning(_ id: UUID) {
+        runningConversationIDs.insert(id)
+    }
+
+    private func markConversationFinished(_ id: UUID) {
+        runningConversationIDs.remove(id)
+        headlessProcesses[id] = nil
     }
 
     func persist() {
@@ -219,7 +251,10 @@ final class AppModel: ObservableObject {
             do { _ = try LocalSessionIndex.moveToTrash(sessionID: sessionID) }
             catch { statusText = "无法将 Session 移到废纸篓：\(error.localizedDescription)"; return }
         }
-        runtimes.removeValue(forKey: id)?.stop(); conversations.removeAll { $0.id == id }
+        runtimes.removeValue(forKey: id)?.stop()
+        headlessProcesses.removeValue(forKey: id)?.cancel()
+        runningConversationIDs.remove(id)
+        conversations.removeAll { $0.id == id }
         toolCalls[id] = nil; plans[id] = nil; extensionEvents[id] = nil
         if selectedConversationID == id { selectedConversationID = conversations.first(where: { $0.archivedAt == nil })?.id }
         if conversations.isEmpty { createConversation() }; persist()
@@ -227,6 +262,8 @@ final class AppModel: ObservableObject {
 
     func archiveConversation(_ id: UUID) {
         runtimes.removeValue(forKey: id)?.stop()
+        headlessProcesses.removeValue(forKey: id)?.cancel()
+        runningConversationIDs.remove(id)
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
         conversations[index].archivedAt = Date()
         if selectedConversationID == id { selectedConversationID = conversations.first(where: { $0.archivedAt == nil })?.id }
@@ -261,22 +298,27 @@ final class AppModel: ObservableObject {
         AccountEnvironment.prepare(home: home)
         let candidate = GrokAccount(id: id, name: name, homePath: home.path, enabled: true, createdAt: Date())
         isAddingAccount = true
-        loginLog = "正在启动 \(name) 的浏览器登录…\n"; statusText = "等待登录"
+        loginLog = localizedFormat("正在启动 %@ 的浏览器登录…", name) + "\n"
+        statusText = "等待登录"
         cli.runLogin(binary: settings.grokBinary, account: candidate, onLine: { [weak self] in
             self?.loginLog += $0 + "\n"
         }) { [weak self] result in
             guard let self else { return }
             self.isAddingAccount = false
             guard case .success = result, candidate.isLoggedIn else {
-                if case .failure(let error) = result { self.loginLog += "登录失败：\(error.localizedDescription)\n" }
-                else { self.loginLog += "登录未完成，账号未添加。\n" }
+                if case .failure(let error) = result {
+                    self.loginLog += self.localizedFormat("登录失败：%@", error.localizedDescription) + "\n"
+                } else {
+                    self.loginLog += self.localized("登录未完成，账号未添加。") + "\n"
+                }
                 self.statusText = "登录未完成"
                 // This directory belongs only to the uncommitted candidate.
                 try? FileManager.default.removeItem(at: home)
                 return
             }
             self.accounts.append(candidate)
-            self.loginLog += "登录完成，账号已添加。\n"; self.statusText = "登录完成"
+            self.loginLog += self.localized("登录完成，账号已添加。") + "\n"
+            self.statusText = "登录完成"
             self.persist()
             self.refreshAvailableModels(account: candidate)
             Task { await self.refreshQuotas() }
@@ -309,7 +351,7 @@ final class AppModel: ObservableObject {
         settings.reasoningEffort = effort
         persist()
         guard let conversationID = selectedConversationID,
-              let runtime = runtimes[conversationID], !isRunning else {
+              let runtime = runtimes[conversationID], !isConversationRunning(conversationID) else {
             statusText = "推理强度将在下次连接时生效"
             return
         }
@@ -318,7 +360,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             switch result {
             case .success:
-                self.statusText = "推理强度已切换为 \(effort)"
+                self.statusText = self.localizedFormat("推理强度已切换为 %@", effort)
             case .failure:
                 // Older runtimes may not implement live model updates. Reconnect on
                 // the next turn and resume the same Grok Session with the new meta.
@@ -333,7 +375,7 @@ final class AppModel: ObservableObject {
         settings.model = model
         persist()
         guard let conversationID = selectedConversationID,
-              let runtime = runtimes[conversationID], !isRunning else {
+              let runtime = runtimes[conversationID], !isConversationRunning(conversationID) else {
             statusText = "模型将在下次连接时生效"
             return
         }
@@ -341,7 +383,7 @@ final class AppModel: ObservableObject {
         runtime.setModel(model, reasoningEffort: settings.reasoningEffort) { [weak self] result in
             guard let self else { return }
             switch result {
-            case .success: self.statusText = "模型已切换为 \(model)"
+            case .success: self.statusText = self.localizedFormat("模型已切换为 %@", model)
             case .failure:
                 self.runtimes.removeValue(forKey: conversationID)?.stop()
                 self.statusText = "模型将在下一条消息生效"
@@ -382,11 +424,19 @@ final class AppModel: ObservableObject {
     }
 
     func login(_ account: GrokAccount) {
-        loginLog = "正在启动 \(account.name) 的浏览器登录…\n"; statusText = "等待登录"
+        loginLog = localizedFormat("正在启动 %@ 的浏览器登录…", account.name) + "\n"
+        statusText = "等待登录"
         cli.runLogin(binary: settings.grokBinary, account: account, onLine: { [weak self] in self?.loginLog += $0 + "\n" }) { [weak self] result in
             guard let self else { return }
-            if case .failure(let error) = result { self.loginLog += "登录失败：\(error.localizedDescription)\n"; self.statusText = "登录失败" }
-            else { self.loginLog += "登录完成。\n"; self.statusText = "登录完成"; self.refreshAvailableModels(account: account); Task { await self.refreshQuotas() } }
+            if case .failure(let error) = result {
+                self.loginLog += self.localizedFormat("登录失败：%@", error.localizedDescription) + "\n"
+                self.statusText = "登录失败"
+            } else {
+                self.loginLog += self.localized("登录完成。") + "\n"
+                self.statusText = "登录完成"
+                self.refreshAvailableModels(account: account)
+                Task { await self.refreshQuotas() }
+            }
         }
     }
 
@@ -402,7 +452,9 @@ final class AppModel: ObservableObject {
             }
         }
         isRefreshingQuota = false
-        statusText = failedCount == 0 ? "额度已刷新" : "\(failedCount) 个账号额度刷新失败"
+        statusText = failedCount == 0
+            ? "额度已刷新"
+            : localizedFormat("%d 个账号额度刷新失败", failedCount)
         persist()
     }
 
@@ -436,37 +488,63 @@ final class AppModel: ObservableObject {
     }
 
     func send(_ prompt: String) {
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty,
-              selectedConversationIndex != nil else { return }
-        if isRunning {
-            if selectedConversationID == runningConversationID {
-                interject(prompt)
-            } else {
-                statusText = "另一个会话正在运行，请切回该会话追加或停止"
-            }
+        guard let conversationID = selectedConversationID,
+              conversations.contains(where: { $0.id == conversationID }),
+              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty else { return }
+
+        if isConversationRunning(conversationID) {
+            guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            interject(prompt, conversationID: conversationID)
             return
         }
+
+        // Capture the target before crossing an async boundary. The user may
+        // switch chats while quotas refresh; a late lookup of the selection
+        // would otherwise deliver this prompt to the newly selected session.
+        let attachments = pendingAttachments
+        let requestedWorkspaceMode = workspaceMode
+        pendingAttachments = []
+        markConversationRunning(conversationID)
         Task {
             let quotaIsStale = accounts.filter(\.enabled).contains {
                 guard let checked = $0.quota?.checkedAt else { return true }
                 return Date().timeIntervalSince(checked) > 300
             }
             if quotaIsStale { await refreshQuotas() }
-            guard let index = selectedConversationIndex else { return }
+            // Cancellation may happen while quota refresh is suspended. Do
+            // not resurrect a turn that the user already stopped.
+            guard isConversationRunning(conversationID) else {
+                cancelledConversationIDs.remove(conversationID)
+                return
+            }
+            guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
+                markConversationFinished(conversationID)
+                return
+            }
             let preferred = conversations[index].messages.isEmpty
                 ? conversations[index].accountID.flatMap { id in accounts.first { $0.id == id && $0.enabled && $0.isLoggedIn } }
                 : nil
             let account = preferred ?? accountForNextTurn()
-            guard let account else { statusText = "没有已登录且启用的账号"; showAccountSettings(); return }
+            guard let account else {
+                markConversationFinished(conversationID)
+                if selectedConversationID == conversationID, pendingAttachments.isEmpty {
+                    pendingAttachments = attachments
+                }
+                statusText = "没有已登录且启用的账号"
+                showAccountSettings()
+                return
+            }
             conversations[index].accountID = account.id
-            if workspaceMode == .modern { sendACP(prompt, attachments: pendingAttachments, account: account, index: index); pendingAttachments = [] }
-            else { sendHeadless(prompt, account: account, index: index) }
+            if requestedWorkspaceMode == .modern {
+                sendACP(prompt, attachments: attachments, account: account, index: index)
+            } else {
+                sendHeadless(prompt, account: account, index: index)
+            }
         }
     }
 
-    private func interject(_ prompt: String) {
-        guard let conversationID = selectedConversationID,
-              let runtime = runtimes[conversationID],
+    private func interject(_ prompt: String, conversationID: UUID) {
+        guard let runtime = runtimes[conversationID],
               let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
             statusText = "当前 Runtime 尚未准备好追加消息"
             return
@@ -481,14 +559,12 @@ final class AppModel: ObservableObject {
         if let streaming { conversations[index].messages.append(streaming) }
         conversations[index].updatedAt = Date()
         runtime.interject(prompt)
-        pendingAttachments = []
         statusText = "已追加到当前运行"
         persist()
     }
 
     private func prepareTurn(_ prompt: String, attachments: [URL] = [], index: Int) -> UUID {
-        isRunning = true
-        runningConversationID = conversations[index].id
+        markConversationRunning(conversations[index].id)
         statusText = "正在连接 Grok Agent"
         let media = attachments.map { url -> MessageMedia in
             if NSImage(contentsOf: url) != nil {
@@ -502,7 +578,9 @@ final class AppModel: ObservableObject {
         conversations[index].messages.append(ChatMessage(role: .assistant, text: "", isStreaming: true))
         conversations[index].updatedAt = Date()
         if conversations[index].title == "新对话" || conversations[index].title == "New chat" {
-            conversations[index].title = prompt.isEmpty ? (attachments.first?.lastPathComponent ?? "附件对话") : String(prompt.prefix(28))
+            conversations[index].title = prompt.isEmpty
+                ? (attachments.first?.lastPathComponent ?? localized("附件对话"))
+                : String(prompt.prefix(28))
         }
         persist(); return conversations[index].id
     }
@@ -511,9 +589,10 @@ final class AppModel: ObservableObject {
     /// partial assistant output and the terminal error card are replaced by a
     /// fresh assistant stream, matching the usual "regenerate" interaction.
     func regenerateLastResponse() {
-        guard !isRunning, let index = selectedConversationIndex,
+        guard let index = selectedConversationIndex,
+              !isConversationRunning(conversations[index].id),
               let userIndex = conversations[index].messages.lastIndex(where: { $0.role == .user }) else {
-            statusText = isRunning ? "请先等待当前运行结束" : "没有可重新生成的消息"
+            statusText = selectedConversationIsRunning ? "请先等待当前运行结束" : "没有可重新生成的消息"
             return
         }
         let userMessage = conversations[index].messages[userIndex]
@@ -536,8 +615,7 @@ final class AppModel: ObservableObject {
 
     private func beginRegeneratedTurn(_ prompt: String, attachments: [URL], account: GrokAccount, index: Int) {
         let conversationID = conversations[index].id
-        isRunning = true
-        runningConversationID = conversationID
+        markConversationRunning(conversationID)
         statusText = "正在重新生成"
         conversations[index].messages.append(ChatMessage(role: .assistant, text: "", isStreaming: true))
         conversations[index].updatedAt = Date()
@@ -553,15 +631,7 @@ final class AppModel: ObservableObject {
             }
         } else {
             let snapshot = conversations[index]
-            cli.runChat(binary: settings.grokBinary, account: account, conversation: snapshot,
-                        prompt: prompt, settings: settings,
-                        onText: { [weak self] in self?.append(text: $0, thought: false, conversationID: conversationID) },
-                        onThought: { [weak self] in self?.append(text: $0, thought: true, conversationID: conversationID) },
-                        onDiagnostic: { [weak self] in self?.statusText = $0 }) { [weak self] result in
-                guard let self else { return }
-                if case .failure(let error) = result { self.finish(conversationID, error: error) }
-                else { self.finish(conversationID) }
-            }
+            runHeadless(prompt, account: account, conversation: snapshot, conversationID: conversationID)
         }
     }
 
@@ -593,7 +663,7 @@ final class AppModel: ObservableObject {
                 let alternate = self.routeAccount(excluding: rejected)
                 if let alternate {
                     self.conversations[currentIndex].accountID = alternate.id
-                    self.statusText = "\(account.name) 连接失败，切换到 \(alternate.name)"
+                    self.statusText = self.localizedFormat("%@ 连接失败，切换到 %@", account.name, alternate.name)
                     self.connectACP(prompt: prompt, attachments: attachments, conversationID: conversationID,
                                     account: alternate, excluded: rejected)
                 } else { self.finish(conversationID, error: error) }
@@ -663,7 +733,8 @@ final class AppModel: ObservableObject {
                                                               "cwd": selectedConversation?.cwd ?? "."]) { [weak self] result in
             guard let self else { return }
             switch result {
-            case .failure(let error): self.statusText = "Skill 更新失败：\(error.localizedDescription)"
+            case .failure(let error):
+                self.statusText = self.localizedFormat("Skill 更新失败：%@", error.localizedDescription)
             case .success(let value):
                 if let rows = value["skills"] as? [[String: Any]] {
                     self.skills = rows.compactMap(self.parseSkill).sorted {
@@ -673,7 +744,9 @@ final class AppModel: ObservableObject {
                     self.skills[index].enabled = enabled
                 }
                 self.refreshSlashCommands(runtime: runtime, cwd: self.selectedConversation?.cwd)
-                self.statusText = enabled ? "已启用 /\(skill.name)" : "已停用 /\(skill.name)"
+                self.statusText = enabled
+                    ? self.localizedFormat("已启用 /%@", skill.name)
+                    : self.localizedFormat("已停用 /%@", skill.name)
             }
         }
     }
@@ -710,9 +783,40 @@ final class AppModel: ObservableObject {
             self.statusText = message
         }
         runtime.onModelState = { [weak self] in self?.updateModelState($0) }
-        runtime.onUpdate = { [weak self] method, params in self?.handleACP(method: method, params: params, conversationID: conversationID) }
+        runtime.onUpdate = { [weak self] method, params in
+            self?.enqueueACPUpdate(method: method, params: params, conversationID: conversationID)
+        }
         runtime.onInteraction = { [weak self] method, requestID, params in
-            self?.handleInteraction(method: method, requestID: requestID, params: params, conversationID: conversationID)
+            guard let self else { return }
+            // Interactions must appear after all preceding streamed activity,
+            // even when the conversation is currently running in background.
+            self.flushACPUpdates(for: conversationID)
+            self.handleInteraction(method: method, requestID: requestID, params: params, conversationID: conversationID)
+        }
+    }
+
+    private func enqueueACPUpdate(method: String, params: [String: Any], conversationID: UUID) {
+        pendingACPUpdates[conversationID, default: []].append(.init(method: method, params: params))
+        guard acpFlushTasks[conversationID] == nil else { return }
+
+        // Keep the visible transcript fluid, while preventing a background
+        // stream from forcing a full AppModel/SwiftUI diff for every token.
+        // Each session owns a separate FIFO queue, so tool/thought/text order
+        // is preserved exactly within that session.
+        let delay = selectedConversationID == conversationID ? 0.016 : 0.12
+        let task = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.flushACPUpdates(for: conversationID)
+        }
+        acpFlushTasks[conversationID] = task
+    }
+
+    private func flushACPUpdates(for conversationID: UUID) {
+        acpFlushTasks.removeValue(forKey: conversationID)?.cancel()
+        guard let updates = pendingACPUpdates.removeValue(forKey: conversationID), !updates.isEmpty else { return }
+        for update in updates {
+            handleACP(method: update.method, params: update.params, conversationID: conversationID)
         }
     }
 
@@ -945,22 +1049,22 @@ final class AppModel: ObservableObject {
 
     func callCapability(method: String, paramsText: String, asNotification: Bool = false) {
         guard let id = selectedConversationID, let runtime = runtimes[id] else {
-            rawCapabilityResult = "请先在当前对话发送一条消息，建立 ACP Session。"; return
+            rawCapabilityResult = localized("请先在当前对话发送一条消息，建立 ACP Session。"); return
         }
         var params: [String: Any] = [:]
         if !paramsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard let data = paramsText.data(using: .utf8),
                   let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                rawCapabilityResult = "参数必须是 JSON 对象。"; return
+                rawCapabilityResult = localized("参数必须是 JSON 对象。"); return
             }
             params = decoded
         }
         if asNotification {
             runtime.sendExtensionNotification(method, params: params)
-            rawCapabilityResult = "通知已发送（JSON-RPC notification 无返回值）。"
+            rawCapabilityResult = localized("通知已发送（JSON-RPC notification 无返回值）。")
             return
         }
-        rawCapabilityResult = "请求中…"
+        rawCapabilityResult = localized("请求中…")
         runtime.callExtension(method, params: params) { [weak self] result in
             switch result {
             case .failure(let error): self?.rawCapabilityResult = error.localizedDescription
@@ -1035,19 +1139,17 @@ final class AppModel: ObservableObject {
     }
 
     private func finish(_ conversationID: UUID, error: Error? = nil) {
+        // The prompt completion response may arrive before the scheduled UI
+        // batch. Drain the FIFO first or the final chunks would target an
+        // assistant row that has already stopped streaming and be discarded.
+        flushACPUpdates(for: conversationID)
         if cancelledConversationIDs.remove(conversationID) != nil {
-            if runningConversationID == conversationID {
-                isRunning = false
-                runningConversationID = nil
-            }
+            markConversationFinished(conversationID)
             statusText = "已停止"
             persist()
             return
         }
-        if runningConversationID == conversationID {
-            isRunning = false
-            runningConversationID = nil
-        }
+        markConversationFinished(conversationID)
         guard let c = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
         if let m = conversations[c].messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) {
             conversations[c].messages[m].isStreaming = false
@@ -1059,9 +1161,12 @@ final class AppModel: ObservableObject {
         }
         if let error {
             let detail = error.localizedDescription == "Internal error"
-                ? "Grok Build 返回内部错误（Internal error）"
+                ? localized("Grok Build 返回内部错误（Internal error）")
                 : error.localizedDescription
-            conversations[c].messages.append(ChatMessage(role: .system, text: "运行失败：\(detail)"))
+            conversations[c].messages.append(ChatMessage(
+                role: .system,
+                text: localizedFormat("运行失败：%@", detail)
+            ))
             statusText = "运行失败"
         }
         else { statusText = "完成" }
@@ -1082,16 +1187,30 @@ final class AppModel: ObservableObject {
 
     private func sendHeadless(_ prompt: String, account: GrokAccount, index: Int) {
         let id = prepareTurn(prompt, index: index), snapshot = conversations[index]
-        cli.runChat(binary: settings.grokBinary, account: account, conversation: snapshot, prompt: prompt, settings: settings,
-                    onText: { [weak self] in self?.append(text: $0, thought: false, conversationID: id) },
-                    onThought: { [weak self] in self?.append(text: $0, thought: true, conversationID: id) },
-                    onDiagnostic: { [weak self] in self?.statusText = $0 }) { [weak self] result in
-            guard let self else { return }; if case .failure(let e) = result { self.finish(id, error: e) } else { self.finish(id) }
+        runHeadless(prompt, account: account, conversation: snapshot, conversationID: id)
+    }
+
+    private func runHeadless(_ prompt: String, account: GrokAccount,
+                             conversation: Conversation, conversationID: UUID) {
+        let service = CLIProcessService()
+        headlessProcesses[conversationID] = service
+        service.runChat(binary: settings.grokBinary, account: account, conversation: conversation,
+                        prompt: prompt, settings: settings,
+                        onText: { [weak self] in self?.append(text: $0, thought: false, conversationID: conversationID) },
+                        onThought: { [weak self] in self?.append(text: $0, thought: true, conversationID: conversationID) },
+                        onDiagnostic: { [weak self] diagnostic in
+                            guard let self, self.selectedConversationID == conversationID else { return }
+                            self.statusText = diagnostic
+                        }) { [weak self] result in
+            guard let self else { return }
+            if case .failure(let error) = result { self.finish(conversationID, error: error) }
+            else { self.finish(conversationID) }
         }
     }
 
     func cancel() {
-        guard let id = runningConversationID else { return }
+        guard let id = selectedConversationID, isConversationRunning(id) else { return }
+        flushACPUpdates(for: id)
         cancelledConversationIDs.insert(id)
         if let index = conversations.firstIndex(where: { $0.id == id }) {
             if let streaming = conversations[index].messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) {
@@ -1105,10 +1224,12 @@ final class AppModel: ObservableObject {
             conversations[index].messages.append(ChatMessage(role: .status, text: "已停止"))
             conversations[index].updatedAt = Date()
         }
-        isRunning = false
-        runningConversationID = nil
+        let runtime = runtimes[id]
+        let headlessProcess = headlessProcesses[id]
+        markConversationFinished(id)
         statusText = "已停止"
-        if let runtime = runtimes[id] { runtime.cancel() } else { cli.cancel() }
+        if let runtime { runtime.cancel() }
+        else { headlessProcess?.cancel() }
         persist()
     }
 

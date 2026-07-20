@@ -49,6 +49,8 @@ grok --version
 
 从 [GitHub Releases](https://github.com/KAMIENDER/GrokDesk/releases) 下载 Apple Silicon DMG，打开后将 `GrokDesk.app` 拖到 `Applications` 快捷入口。ZIP 压缩包继续作为便携备用版本提供。
 
+首次安装后，GrokDesk 会通过 Sparkle 从 GitHub Releases 检查新版本。可以在 **GrokDesk → 检查更新…** 手动检查，也可以在 **设置 → 通用 → 软件更新** 中启用定期检查和后台自动下载安装。更新压缩包在安装前会验证项目专用的 Sparkle EdDSA 签名。
+
 当前社区构建使用临时签名，尚未通过 Apple 公证。首次启动时请按住 Control 点击 `GrokDesk.app`，选择“打开”，再确认 macOS 提示。要实现没有 Gatekeeper 警告的直接安装，需要 Apple Developer ID 证书；本项目目前尚未配置该证书。
 
 ## 从源码构建
@@ -72,6 +74,14 @@ swift build -c release --product GrokDesk
 ```bash
 ./scripts/package-dmg.sh
 ```
+
+维护者可以同时生成 DMG、Sparkle 更新 ZIP 和已签名的 `appcast.xml`：
+
+```bash
+./scripts/package-release.sh
+```
+
+推送 `v0.1.3` 这样的版本标签会触发 GitHub Release 工作流。仓库需要配置由 Sparkle `generate_keys` 工具导出的 `SPARKLE_PRIVATE_KEY` Actions Secret；私钥不得提交到仓库。
 
 ## 架构
 

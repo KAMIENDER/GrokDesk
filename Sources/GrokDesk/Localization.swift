@@ -21,10 +21,29 @@ extension AppSettings {
 enum L10n {
     static func text(_ key: String, language: String) -> String {
         guard language == "en" else { return key }
-        return english[key] ?? key
+        // Dynamic strings must use the same table as SwiftUI literals. Keeping
+        // a second hand-maintained dictionary caused parts of one screen to
+        // switch language while adjacent labels stayed in Chinese.
+        if let bundle = englishBundle {
+            let localized = bundle.localizedString(forKey: key, value: key, table: nil)
+            if localized != key { return localized }
+        }
+        return englishFallback[key] ?? key
     }
 
-    private static let english: [String: String] = [
+    static func format(_ key: String, language: String, _ arguments: CVarArg...) -> String {
+        String(format: text(key, language: language),
+               locale: Locale(identifier: language == "en" ? "en" : "zh-Hans"),
+               arguments: arguments)
+    }
+
+    private static let englishBundle: Bundle? = {
+        guard let url = Bundle.main.url(forResource: "en", withExtension: "lproj") else { return nil }
+        return Bundle(url: url)
+    }()
+
+    /// Minimal fallback for development environments that do not copy resources.
+    private static let englishFallback: [String: String] = [
         "新对话": "New chat", "项目": "Projects", "设置": "Settings",
         "账号与额度": "Accounts & usage", "刷新额度": "Refresh usage",
         "添加 Grok 账号": "Add Grok account", "尚未配置": "Not configured",
@@ -38,6 +57,10 @@ enum L10n {
         "完成": "Completed", "失败": "Failed", "等待": "Pending", "运行中": "Running",
         "通用": "General", "Agent 能力": "Agent capabilities", "兼容性": "Compatibility",
         "账号与用量": "Accounts & usage", "已归档对话": "Archived chats",
+        "检查更新…": "Check for Updates…", "软件更新": "Software updates",
+        "自动检查更新": "Automatically check for updates",
+        "自动下载并安装": "Automatically download and install",
+        "当前版本": "Current version",
         "选择 Grok 工作文件夹": "Choose a Grok workspace",
         "Grok 将在这个文件夹中读取文件、修改代码并运行工具。": "Grok will read files, modify code, and run tools in this folder.",
         "选择文件夹": "Choose folder", "本机 Grok CLI": "Local Grok CLI",

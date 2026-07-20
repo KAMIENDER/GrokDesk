@@ -49,6 +49,8 @@ grok --version
 
 Download the Apple Silicon DMG from [GitHub Releases](https://github.com/KAMIENDER/GrokDesk/releases), open it, and drag `GrokDesk.app` onto the `Applications` shortcut. The ZIP archive remains available as a portable alternative.
 
+After the first installation, GrokDesk checks GitHub Releases through Sparkle. You can check manually from **GrokDesk → Check for Updates…**, or configure automatic checks and background downloads in **Settings → General → Software updates**. Update archives are authenticated with a dedicated Sparkle EdDSA signature before installation.
+
 The current community build is ad-hoc signed and has not been notarized by Apple. On first launch, Control-click `GrokDesk.app`, choose **Open**, and confirm the macOS prompt. A notarized, warning-free distribution requires an Apple Developer ID certificate, which is not currently available to this project.
 
 ## Build from source
@@ -72,6 +74,14 @@ To create the drag-to-install DMG:
 ```bash
 ./scripts/package-dmg.sh
 ```
+
+Maintainers can create the DMG, Sparkle ZIP, and signed `appcast.xml` together with:
+
+```bash
+./scripts/package-release.sh
+```
+
+Pushing a version tag such as `v0.1.3` runs the release workflow. The repository must contain a `SPARKLE_PRIVATE_KEY` Actions secret exported from Sparkle's `generate_keys` tool; the private key must never be committed.
 
 ## Architecture
 

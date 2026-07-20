@@ -112,22 +112,57 @@ private final class AttachmentTextView: NSTextView {
 
     override func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
-        if let urls = pasteboard.readObjects(forClasses: [NSURL.self],
-                                             options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+        // Finder exposes file selections as NSURL objects. Mapping explicitly
+        // avoids relying on an NSArray -> [URL] conditional bridge, which can
+        // fail even though the pasteboard contains valid file URLs.
+        let urls = (pasteboard.readObjects(forClasses: [NSURL.self],
+                                           options: [.urlReadingFileURLsOnly: true]) as? [NSURL])?
+            .map { $0 as URL } ?? []
+        if !urls.isEmpty {
             onPasteAttachments(urls)
             return
         }
-        if let image = NSImage(pasteboard: pasteboard),
-           let tiff = image.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: tiff),
-           let data = bitmap.representation(using: .png, properties: [:]) {
-            let url = AppPaths.pastedAttachments.appendingPathComponent("粘贴图片-\(UUID().uuidString.prefix(8)).png")
+
+        // Screenshot tools and browsers do not all advertise an NSImage-
+        // readable representation. Preserve common raw image payloads first;
+        // NSImage remains the fallback for other image pasteboard formats.
+        if let attachment = rawImageAttachment(from: pasteboard) ?? renderedImageAttachment(from: pasteboard) {
             do {
-                try data.write(to: url, options: .atomic)
-                onPasteAttachments([url])
+                try FileManager.default.createDirectory(at: AppPaths.pastedAttachments,
+                                                        withIntermediateDirectories: true)
+                try attachment.data.write(to: attachment.url, options: .atomic)
+                onPasteAttachments([attachment.url])
                 return
             } catch { NSSound.beep() }
         }
         super.paste(sender)
+    }
+
+    private func rawImageAttachment(from pasteboard: NSPasteboard) -> (url: URL, data: Data)? {
+        let candidates: [(type: NSPasteboard.PasteboardType, fileExtension: String)] = [
+            (.png, "png"),
+            (NSPasteboard.PasteboardType("public.jpeg"), "jpg"),
+            (NSPasteboard.PasteboardType("public.heic"), "heic"),
+            (NSPasteboard.PasteboardType("public.webp"), "webp"),
+            (.tiff, "tiff")
+        ]
+        for candidate in candidates {
+            guard let data = pasteboard.data(forType: candidate.type), !data.isEmpty else { continue }
+            return (pastedImageURL(fileExtension: candidate.fileExtension), data)
+        }
+        return nil
+    }
+
+    private func renderedImageAttachment(from pasteboard: NSPasteboard) -> (url: URL, data: Data)? {
+        guard let image = NSImage(pasteboard: pasteboard),
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let data = bitmap.representation(using: .png, properties: [:]) else { return nil }
+        return (pastedImageURL(fileExtension: "png"), data)
+    }
+
+    private func pastedImageURL(fileExtension: String) -> URL {
+        AppPaths.pastedAttachments
+            .appendingPathComponent("粘贴图片-\(UUID().uuidString.prefix(8)).\(fileExtension)")
     }
 }

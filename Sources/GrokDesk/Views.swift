@@ -470,17 +470,34 @@ struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showInspector: Bool
     @Binding var showSidebar: Bool
-    @State private var prompt = ""
+    /// Draft text belongs to a conversation, not to the chat window. Keeping
+    /// one shared string lets a background stream re-render the composer while
+    /// the user is editing another session and also leaks drafts on switching.
+    @State private var promptsByConversation: [UUID: String] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
             ChatHeader(showInspector: $showInspector, showSidebar: $showSidebar)
             Divider().opacity(0.55)
             messageArea
-            ComposerView(prompt: $prompt)
+            ComposerView(prompt: selectedPrompt)
                 .padding(.horizontal, 28).padding(.bottom, 18)
         }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.34))
+    }
+
+    private var selectedPrompt: Binding<String> {
+        let conversationID = model.selectedConversationID
+        return Binding(
+            get: {
+                guard let conversationID else { return "" }
+                return promptsByConversation[conversationID] ?? ""
+            },
+            set: { value in
+                guard let conversationID else { return }
+                promptsByConversation[conversationID] = value
+            }
+        )
     }
 
     private var messageArea: some View {
@@ -514,7 +531,9 @@ struct ChatHeader: View {
     @Binding var showInspector: Bool
     @Binding var showSidebar: Bool
     private var projectName: String {
-        guard let cwd = model.selectedConversation?.cwd else { return "选择项目" }
+        guard let cwd = model.selectedConversation?.cwd else {
+            return L10n.text("选择项目", language: model.settings.effectiveLanguage)
+        }
         return URL(fileURLWithPath: cwd).lastPathComponent.isEmpty ? cwd : URL(fileURLWithPath: cwd).lastPathComponent
     }
     var body: some View {
@@ -530,7 +549,8 @@ struct ChatHeader: View {
                     Image(systemName: "folder").foregroundStyle(.secondary)
                     Text(projectName).fontWeight(.medium).lineLimit(1)
                 }
-            }.buttonStyle(.plain).help(model.selectedConversation?.cwd ?? "选择工作目录")
+            }.buttonStyle(.plain).help(model.selectedConversation?.cwd
+                ?? L10n.text("选择工作目录", language: model.settings.effectiveLanguage))
             Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
             Text(model.selectedConversation?.title ?? L10n.text("新对话", language: model.settings.effectiveLanguage)).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
@@ -555,7 +575,8 @@ struct EmptyConversationView: View {
         VStack(spacing: 14) {
             Image(systemName: "sparkles").font(.system(size: 28, weight: .light)).foregroundStyle(.secondary)
             Text("今天想构建什么？").font(.system(size: 24, weight: .semibold))
-            Text(model.selectedConversation?.cwd ?? "选择一个工作目录，然后把任务交给 Grok")
+            Text(model.selectedConversation?.cwd
+                 ?? L10n.text("选择一个工作目录，然后把任务交给 Grok", language: model.settings.effectiveLanguage))
                 .font(.callout).foregroundStyle(.secondary).lineLimit(1)
             if model.accounts.isEmpty {
                 Button("添加 Grok 账号", action: model.showAccountSettings).buttonStyle(.borderedProminent)
@@ -628,7 +649,8 @@ struct ComposerView: View {
     }
 
     private var canSend: Bool {
-        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!model.isRunning && !model.pendingAttachments.isEmpty)
+        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || (!model.selectedConversationIsRunning && !model.pendingAttachments.isEmpty)
     }
     private func send() {
         guard canSend else { return }
@@ -660,11 +682,14 @@ struct ComposerView: View {
             .background(.secondary.opacity(0.07), in: Capsule())
         }
         .buttonStyle(.plain)
-        .help(model.selectedConversation?.cwd ?? "选择工作文件夹")
+        .help(model.selectedConversation?.cwd
+            ?? L10n.text("选择工作文件夹", language: model.settings.effectiveLanguage))
     }
 
     private var workspaceName: String {
-        guard let path = model.selectedConversation?.cwd else { return "选择文件夹" }
+        guard let path = model.selectedConversation?.cwd else {
+            return L10n.text("选择文件夹", language: model.settings.effectiveLanguage)
+        }
         let name = URL(fileURLWithPath: path).lastPathComponent
         return name.isEmpty ? path : name
     }
@@ -847,7 +872,7 @@ struct ReasoningEffortMenu: View {
         }
         .menuStyle(.borderlessButton).fixedSize()
         .menuIndicator(.hidden)
-        .disabled(model.isRunning)
+        .disabled(model.selectedConversationIsRunning)
         .help("选择模型推理强度")
     }
 
@@ -894,15 +919,19 @@ struct MessageRow: View {
             HStack(spacing: 12) {
                 Label { messageContent } icon: { Image(systemName: "exclamationmark.circle") }
                 Spacer(minLength: 8)
-                if message.text.hasPrefix("运行失败：") {
+                if message.text.hasPrefix("运行失败：") || message.text.hasPrefix("Run failed: ") {
                     Button("重新生成", action: model.regenerateLastResponse)
                         .buttonStyle(.bordered)
-                        .disabled(model.isRunning)
+                        .disabled(model.selectedConversationIsRunning)
                 }
             }
             .foregroundStyle(.red).padding(12).background(.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
         case .status:
-            Label(message.text, systemImage: "stop.circle")
+            Label {
+                Text(L10n.text(message.text, language: model.settings.effectiveLanguage))
+            } icon: {
+                Image(systemName: "stop.circle")
+            }
                 .font(GrokTypography.metadata).foregroundStyle(.secondary)
         }
     }
@@ -916,10 +945,19 @@ struct MessageRow: View {
                 }
                 .font(GrokTypography.item).foregroundStyle(.secondary)
             }
-            MarkdownText(text: message.text.isEmpty && message.isStreaming ? "正在思考…" : message.text)
+            MarkdownText(text: message.text.isEmpty && message.isStreaming
+                ? L10n.text("正在思考…", language: model.settings.effectiveLanguage)
+                : displayedMessageText)
             if let media = message.media { ForEach(media) { MessageMediaView(media: $0) } }
             if message.isStreaming { HStack(spacing: 6) { ProgressView().controlSize(.mini); Text("Grok 正在工作").font(GrokTypography.metadata).foregroundStyle(.secondary) } }
         }
+    }
+
+    private var displayedMessageText: String {
+        guard message.role == .system,
+              message.text.hasPrefix("运行失败：") else { return message.text }
+        let detail = String(message.text.dropFirst("运行失败：".count))
+        return L10n.format("运行失败：%@", language: model.settings.effectiveLanguage, detail)
     }
 }
 
@@ -1189,10 +1227,15 @@ private struct ContextUsageIndicator: View {
                 Text("\(format(usage.usedTokens)) / \(format(usage.totalTokens)) tokens")
                     .font(GrokTypography.metadata).foregroundStyle(.secondary)
                 Divider()
-                Text("达到 \(model.settings.effectiveAutoCompactThresholdPercent)% 时由 Grok Build 自动压缩")
+                Text(L10n.format("达到 %d%% 时由 Grok Build 自动压缩",
+                                 language: model.settings.effectiveLanguage,
+                                 model.settings.effectiveAutoCompactThresholdPercent))
                     .font(GrokTypography.metadata).foregroundStyle(.secondary)
                 if usage.compactionCount > 0 {
-                    Text("本 Session 已压缩 \(usage.compactionCount) 次").font(GrokTypography.metadata).foregroundStyle(.secondary)
+                    Text(L10n.format("本 Session 已压缩 %d 次",
+                                     language: model.settings.effectiveLanguage,
+                                     usage.compactionCount))
+                        .font(GrokTypography.metadata).foregroundStyle(.secondary)
                 }
             }.padding(14).frame(width: 280)
         }
@@ -1281,7 +1324,7 @@ struct EventInspector: View {
 
 struct InspectorEmpty: View {
     let title: String; let icon: String
-    var body: some View { VStack(spacing: 8) { Image(systemName: icon).font(.title2).foregroundStyle(.tertiary); Text(title).font(GrokTypography.metadata).foregroundStyle(.secondary) }.frame(maxWidth: .infinity).padding(.top, 50) }
+    var body: some View { VStack(spacing: 8) { Image(systemName: icon).font(.title2).foregroundStyle(.tertiary); Text(LocalizedStringKey(title)).font(GrokTypography.metadata).foregroundStyle(.secondary) }.frame(maxWidth: .infinity).padding(.top, 50) }
 }
 
 struct CapabilityCenter: View {
@@ -1303,7 +1346,10 @@ struct CapabilityCenter: View {
                 Toggle("作为 notification 发送", isOn: $asNotification).font(.caption)
                 Button(asNotification ? "发送通知" : "调用能力") { model.callCapability(method: method, paramsText: params, asNotification: asNotification) }.buttonStyle(.borderedProminent)
                 Divider()
-                Text(model.rawCapabilityResult.isEmpty ? "先发送一条消息建立 ACP Session，再调用扩展能力。" : model.rawCapabilityResult).font(.caption.monospaced()).textSelection(.enabled).foregroundStyle(.secondary)
+                Text(model.rawCapabilityResult.isEmpty
+                     ? L10n.text("先发送一条消息建立 ACP Session，再调用扩展能力。", language: model.settings.effectiveLanguage)
+                     : model.rawCapabilityResult)
+                    .font(.caption.monospaced()).textSelection(.enabled).foregroundStyle(.secondary)
             }.padding(14)
         }
     }
@@ -1337,7 +1383,10 @@ struct AccountsView: View {
                         Image(systemName: "plus.circle").foregroundStyle(.secondary)
                         TextField("账号名称，例如：工作账号", text: $newName).textFieldStyle(.plain)
                         Button(model.isAddingAccount ? "等待登录…" : "添加账号") {
-                            model.addAccount(name: newName.isEmpty ? "账号 \(model.accounts.count + 1)" : newName); newName = ""
+                            model.addAccount(name: newName.isEmpty
+                                ? L10n.format("账号 %d", language: model.settings.effectiveLanguage, model.accounts.count + 1)
+                                : newName)
+                            newName = ""
                         }.buttonStyle(.borderedProminent).disabled(model.isAddingAccount)
                     }
                 }
@@ -1391,7 +1440,7 @@ private struct UsageCard: View {
                                     }
                                 }
                             } else {
-                                Text(account.isLoggedIn ? "额度待刷新" : "尚未登录")
+                                Text(LocalizedStringKey(account.isLoggedIn ? "额度待刷新" : "尚未登录"))
                                     .font(GrokTypography.metadata).foregroundStyle(.secondary)
                             }
                             if let end = account.quota?.periodEnd, !end.isEmpty {
@@ -1470,7 +1519,7 @@ struct AccountCard: View {
             } else if let error = account.quota?.error {
                 Text(error).font(GrokTypography.metadata).foregroundStyle(.red)
             } else {
-                Text(account.isLoggedIn ? "登录成功，等待刷新额度" : "尚未登录")
+                Text(LocalizedStringKey(account.isLoggedIn ? "登录成功，等待刷新额度" : "尚未登录"))
                     .font(GrokTypography.metadata).foregroundStyle(.secondary)
             }
             HStack {
@@ -1856,6 +1905,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 /// navigation model used by modern coding agents instead of a cramped form sheet.
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var updateManager: UpdateManager
     @Binding private var sidebarWidth: CGFloat
     @State private var search = ""
     @FocusState private var searchFocused: Bool
@@ -1967,6 +2017,34 @@ struct SettingsView: View {
                         Text(verbatim: "简体中文").tag("zh-Hans")
                         Text(verbatim: "English").tag("en")
                     }.labelsHidden().frame(width: 150)
+                }
+            }
+            SettingsGroup(title: "软件更新") {
+                SettingsToggleRow(
+                    title: "自动检查更新",
+                    detail: "定期从 GitHub Releases 检查 GrokDesk 新版本",
+                    value: Binding(
+                        get: { updateManager.automaticallyChecksForUpdates },
+                        set: { updateManager.setAutomaticallyChecksForUpdates($0) }
+                    )
+                )
+                Divider()
+                SettingsToggleRow(
+                    title: "自动下载并安装",
+                    detail: "在后台准备更新，并在安全时完成安装",
+                    value: Binding(
+                        get: { updateManager.automaticallyDownloadsUpdates },
+                        set: { updateManager.setAutomaticallyDownloadsUpdates($0) }
+                    )
+                )
+                .disabled(!updateManager.automaticallyChecksForUpdates)
+                Divider()
+                SettingsRow(title: "当前版本", detail: "手动检查可用的新版本") {
+                    HStack(spacing: 12) {
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
+                            .foregroundStyle(.secondary)
+                        Button("检查更新…") { updateManager.checkForUpdates() }
+                    }
                 }
             }
             SettingsGroup(title: "默认值") {
@@ -2129,7 +2207,9 @@ private struct SettingsAccountsView: View {
                 Image(systemName: "plus.circle").foregroundStyle(.secondary)
                 TextField("账号名称，例如：工作账号", text: $newName).textFieldStyle(.plain)
                 Button(model.isAddingAccount ? "等待登录…" : "添加账号") {
-                    model.addAccount(name: newName.isEmpty ? "账号 \(model.accounts.count + 1)" : newName)
+                    model.addAccount(name: newName.isEmpty
+                        ? L10n.format("账号 %d", language: model.settings.effectiveLanguage, model.accounts.count + 1)
+                        : newName)
                     newName = ""
                 }
                 .buttonStyle(.borderedProminent)
@@ -2218,7 +2298,9 @@ private struct ArchivedChatsView: View {
                         HStack {
                             Label(project.name, systemImage: "folder").font(GrokTypography.item(.semibold))
                             Spacer()
-                            Text("\(project.conversations.count) 个对话").font(GrokTypography.metadata).foregroundStyle(.secondary)
+                            Text(L10n.format("%d 个对话", language: model.settings.effectiveLanguage,
+                                             project.conversations.count))
+                                .font(GrokTypography.metadata).foregroundStyle(.secondary)
                         }
                         VStack(spacing: 0) {
                             ForEach(Array(project.conversations.enumerated()), id: \.element.id) { index, conversation in
@@ -2251,7 +2333,9 @@ private struct ArchivedChatsView: View {
             Button("移到废纸篓", role: .destructive) { model.deleteConversation(conversation.id); deleteCandidate = nil }
             Button("取消", role: .cancel) { deleteCandidate = nil }
         } message: { conversation in
-            Text("“\(conversation.title)” 的本地 Grok Session 将移到 macOS 废纸篓。")
+            Text(L10n.format("“%@” 的本地 Grok Session 将移到 macOS 废纸篓。",
+                             language: model.settings.effectiveLanguage,
+                             conversation.title))
         }
     }
 }

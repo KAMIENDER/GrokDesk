@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="$ROOT_DIR/dist/GrokDesk.app"
 RELEASE_DIR="$ROOT_DIR/dist/releases"
 
-"$ROOT_DIR/scripts/package-app.sh"
+if [[ "${SKIP_PACKAGE_APP:-0}" != "1" ]]; then
+  "$ROOT_DIR/scripts/package-app.sh"
+fi
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist")"

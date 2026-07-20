@@ -38,9 +38,11 @@ struct SkillsSettingsView: View {
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(.primary.opacity(0.10)))
 
             if filtered.isEmpty {
-                ContentUnavailableView(query.isEmpty ? "未发现 Skills" : "没有匹配的 Skill",
+                ContentUnavailableView(LocalizedStringKey(query.isEmpty ? "未发现 Skills" : "没有匹配的 Skill"),
                                        systemImage: "shippingbox",
-                                       description: Text(query.isEmpty ? "请确认 ~/.grok/skills 或项目 .grok/skills 中存在 SKILL.md。" : "尝试其他关键词。"))
+                                       description: Text(LocalizedStringKey(query.isEmpty
+                                           ? "请确认 ~/.grok/skills 或项目 .grok/skills 中存在 SKILL.md。"
+                                           : "尝试其他关键词。")))
                     .frame(maxWidth: .infinity).padding(.vertical, 56)
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 10)], spacing: 8) {

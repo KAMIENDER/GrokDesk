@@ -1,0 +1,41 @@
+name: Release GrokDesk
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Apple Silicon keeps the published artifact aligned with GrokDesk's
+    # currently documented prebuilt platform.
+    runs-on: macos-14-xlarge
+    env:
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate update signing secret
+        run: test -n "$SPARKLE_PRIVATE_KEY" || { echo "Missing SPARKLE_PRIVATE_KEY repository secret"; exit 1; }
+      - name: Set release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Resources/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" Resources/Info.plist
+      - name: Build signed update feed and installers
+        env:
+          GROKDESK_RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/package-release.sh
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/releases/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/releases/* --generate-notes --title "GrokDesk $GITHUB_REF_NAME"
+          fi
