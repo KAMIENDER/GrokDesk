@@ -36,7 +36,9 @@ GENERATE_ARGS=(
   --link "https://github.com/KAMIENDER/GrokDesk/releases/tag/${TAG}"
   --maximum-versions 1
   --maximum-deltas 0
-  -o appcast.xml
+  # Keep the generated feed beside the staged ZIP. generate_appcast resolves a
+  # relative output path against the process working directory, not UPDATE_DIR.
+  -o "$UPDATE_DIR/appcast.xml"
   "$UPDATE_DIR"
 )
 
