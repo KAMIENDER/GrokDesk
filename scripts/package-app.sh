@@ -35,6 +35,14 @@ if ! /usr/bin/otool -l "$CONTENTS/MacOS/GrokDesk" | /usr/bin/grep -q '@executabl
   /usr/bin/install_name_tool -add_rpath '@executable_path/../Frameworks' "$CONTENTS/MacOS/GrokDesk"
 fi
 
-codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$CONTENTS/Frameworks/Sparkle.framework"
-codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR"
+# Hardened Runtime enables library validation. It requires the host app and
+# Sparkle to share a real signing Team ID, which ad-hoc signatures do not have.
+# Keep it for Developer ID releases, but omit it for the public ad-hoc build so
+# macOS can load the bundled Sparkle framework instead of aborting in dyld.
+CODESIGN_ARGS=(--force --deep --sign "$CODESIGN_IDENTITY")
+if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
+  CODESIGN_ARGS+=(--options runtime)
+fi
+codesign "${CODESIGN_ARGS[@]}" "$CONTENTS/Frameworks/Sparkle.framework"
+codesign "${CODESIGN_ARGS[@]}" "$APP_DIR"
 echo "Created $APP_DIR"
