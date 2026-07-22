@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
     @Published var runtimeInstallSucceeded = false
     @Published var runtimeInstallLog = ""
     @Published var runtimeInstallError: String?
+    @Published private(set) var needsLanguageOnboarding = false
 
     private let cli = CLIProcessService()
     private let runtimeInstaller = GrokRuntimeInstaller()
@@ -68,11 +69,22 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        let hadPersistedState = FileManager.default.fileExists(atPath: AppPaths.state.path)
         try? AppPaths.prepare()
         let state = StateStore.load()
         accounts = state.accounts; conversations = state.conversations
         selectedConversationID = state.selectedConversationID; settings = state.settings
         hiddenProjectPaths = state.hiddenProjectPaths ?? []
+        if let completed = settings.hasCompletedLanguageOnboarding {
+            needsLanguageOnboarding = !completed
+        } else if hadPersistedState {
+            // Existing installations already had an implicit language choice.
+            // Do not interrupt them with onboarding after an app update.
+            settings.hasCompletedLanguageOnboarding = true
+        } else {
+            settings.hasCompletedLanguageOnboarding = false
+            needsLanguageOnboarding = true
+        }
         // An unsent folder selection is not a completed conversation and must
         // not survive an app relaunch as an extra empty sidebar session.
         conversations.removeAll(where: \.isUnsentLocalDraft)
@@ -94,7 +106,7 @@ final class AppModel: ObservableObject {
         availableModels = [GrokModelOption(id: settings.model, name: settings.model)]
         persist()
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.needsLanguageOnboarding else { return }
             if self.checkRuntimeAvailability(offerInstall: true) {
                 self.refreshAvailableModels()
             }
@@ -130,6 +142,35 @@ final class AppModel: ObservableObject {
         try? StateStore.save(PersistedState(accounts: accounts, conversations: conversations,
                                              selectedConversationID: selectedConversationID, settings: settings,
                                              hiddenProjectPaths: hiddenProjectPaths))
+    }
+
+    func completeLanguageOnboarding(language: String) {
+        guard ["zh-Hans", "en"].contains(language) else { return }
+        settings.language = language
+        settings.hasCompletedLanguageOnboarding = true
+        needsLanguageOnboarding = false
+
+        // These records may be created while the onboarding screen is still
+        // visible. Normalize only untouched defaults; user-defined names and
+        // imported session titles must never be translated or overwritten.
+        for index in accounts.indices
+        where accounts[index].createdAt == .distantPast
+            && ["本机 Grok CLI", "Local Grok CLI"].contains(accounts[index].name) {
+            accounts[index].name = L10n.text("本机 Grok CLI", language: settings.effectiveLanguage)
+        }
+        for index in conversations.indices
+        where conversations[index].isUnsentLocalDraft
+            && ["新对话", "New chat"].contains(conversations[index].title) {
+            conversations[index].title = L10n.text("新对话", language: settings.effectiveLanguage)
+        }
+        statusText = L10n.text("就绪", language: settings.effectiveLanguage)
+        persist()
+
+        // Runtime installation is intentionally deferred until onboarding has
+        // finished so two unrelated first-launch prompts never compete.
+        if checkRuntimeAvailability(offerInstall: true) {
+            refreshAvailableModels()
+        }
     }
 
     @discardableResult

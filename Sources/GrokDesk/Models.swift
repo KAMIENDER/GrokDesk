@@ -121,6 +121,10 @@ struct AppSettings: Codable, Hashable {
     /// and in-app language switching were introduced.
     var language: String?
     var appearance: String?
+    /// `nil` identifies settings written before first-launch onboarding existed.
+    /// This lets upgrades keep their current UI while clean installs must make
+    /// an explicit language choice before entering the workspace.
+    var hasCompletedLanguageOnboarding: Bool?
 
     var effectiveContextWindowTokens: Int { max(contextWindowTokens ?? 225_000, 16_000) }
     var effectiveAutoCompactThresholdPercent: Int {

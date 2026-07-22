@@ -1028,16 +1028,18 @@ struct MessageRow: View {
     private var messageContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let events = message.events, !events.isEmpty {
-                ActivityTimeline(events: events)
+                ActivityTimeline(events: events, baseDirectory: model.selectedConversation?.cwd)
             } else if let thought = message.thought, !thought.isEmpty {
                 DisclosureGroup("思考过程") {
-                    MarkdownText(text: thought).foregroundStyle(.secondary).padding(.top, 5)
+                    MarkdownText(text: thought, baseDirectory: model.selectedConversation?.cwd)
+                        .foregroundStyle(.secondary).padding(.top, 5)
                 }
                 .font(GrokTypography.item).foregroundStyle(.secondary)
             }
             MarkdownText(text: message.text.isEmpty && message.isStreaming
                 ? L10n.text("正在思考…", language: model.settings.effectiveLanguage)
-                : displayedMessageText)
+                : displayedMessageText,
+                baseDirectory: model.selectedConversation?.cwd)
             if let media = message.media { ForEach(media) { MessageMediaView(media: $0) } }
             if message.isStreaming { HStack(spacing: 6) { ProgressView().controlSize(.mini); Text("Grok 正在工作").font(GrokTypography.metadata).foregroundStyle(.secondary) } }
         }
@@ -1101,6 +1103,7 @@ private enum ActivityCategory: Int, CaseIterable, Identifiable {
 
 private struct ActivityTimeline: View {
     let events: [ChatTimelineEvent]
+    let baseDirectory: String?
     @State private var expanded = false
 
     /// Runtime lifecycle noise is still available in the inspector's raw ACP
@@ -1137,7 +1140,7 @@ private struct ActivityTimeline: View {
                 if expanded {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(runs) { run in
-                            ActivityCategoryGroup(category: run.category, events: run.events)
+                            ActivityCategoryGroup(category: run.category, events: run.events, baseDirectory: baseDirectory)
                         }
                     }
                     .padding(.top, 8).padding(.leading, 20)
@@ -1184,6 +1187,7 @@ private struct ActivityRun: Identifiable {
 private struct ActivityCategoryGroup: View {
     let category: ActivityCategory
     let events: [ChatTimelineEvent]
+    let baseDirectory: String?
     @State private var expanded = false
 
     var body: some View {
@@ -1196,7 +1200,7 @@ private struct ActivityCategoryGroup: View {
             .font(GrokTypography.item(.medium))
             if expanded {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(events) { TimelineEventRow(event: $0) }
+                    ForEach(events) { TimelineEventRow(event: $0, baseDirectory: baseDirectory) }
                 }
                 .padding(.top, 8).padding(.leading, 20)
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -1209,6 +1213,7 @@ private struct ActivityCategoryGroup: View {
 private struct TimelineEventRow: View {
     @Environment(\.locale) private var locale
     let event: ChatTimelineEvent
+    let baseDirectory: String?
     @State private var expanded = false
 
     var body: some View {
@@ -1226,7 +1231,9 @@ private struct TimelineEventRow: View {
                         eventDetail(title: "输入", value: input)
                     }
                     if let output = event.output, !output.isEmpty {
-                        if event.kind == "thought" { MarkdownText(text: output).foregroundStyle(.secondary) }
+                        if event.kind == "thought" {
+                            MarkdownText(text: output, baseDirectory: baseDirectory).foregroundStyle(.secondary)
+                        }
                         else { eventDetail(title: event.kind == "plan" ? "内容" : "结果", value: output) }
                     }
                 }
@@ -1673,6 +1680,7 @@ struct PlanApprovalSheet: View {
 
 struct MarkdownText: View {
     let text: String
+    var baseDirectory: String? = nil
     private var blocks: [MarkdownBlock] { MarkdownBlock.parse(text) }
 
     var body: some View {
@@ -1683,6 +1691,8 @@ struct MarkdownText: View {
                     MarkdownInline(text: value)
                         .font(.system(size: 15))
                         .lineSpacing(6)
+                case .image(let reference):
+                    MarkdownImageView(reference: reference, baseDirectory: baseDirectory)
                 case .heading(let level, let value):
                     MarkdownInline(text: value)
                         .font(.system(size: headingSize(level)))
@@ -1766,7 +1776,7 @@ private struct MarkdownBlock: Identifiable {
     struct OrderedItem { let number: Int; let text: String }
     enum Content {
         case paragraph(String), heading(Int, String), unorderedList([String]), orderedList([OrderedItem])
-        case quote(String), divider, code(String, String), table([[String]])
+        case quote(String), divider, code(String, String), table([[String]]), image(MarkdownImageReference)
     }
     let id = UUID()
     let content: Content
@@ -1835,6 +1845,10 @@ private struct MarkdownBlock: Identifiable {
 
             let line = lines[index]
             if line.trimmingCharacters(in: .whitespaces).isEmpty { flush(); index += 1; continue }
+            if let image = MarkdownImageReference.parseStandalone(line) {
+                flush(); result.append(MarkdownBlock(content: .image(image)))
+                index += 1; continue
+            }
             if let heading = heading(line) {
                 flush(); result.append(MarkdownBlock(content: .heading(heading.level, heading.title)))
                 index += 1; continue
@@ -1944,6 +1958,79 @@ private struct MarkdownBlock: Identifiable {
         if value.hasSuffix("|") { value.removeLast() }
         return value.split(separator: "|", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+}
+
+private struct MarkdownImageView: View {
+    let reference: MarkdownImageReference
+    let baseDirectory: String?
+    @State private var preview: AttachmentPreview?
+
+    var body: some View {
+        Group {
+            if let url = reference.resolvedURL(relativeTo: baseDirectory) {
+                if url.isFileURL {
+                    localImage(url)
+                } else if ["https", "http"].contains(url.scheme?.lowercased()) {
+                    remoteImage(url)
+                } else {
+                    unavailable(destination: reference.destination)
+                }
+            } else {
+                unavailable(destination: reference.destination)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(item: $preview) { AttachmentDetailView(url: $0.url) }
+    }
+
+    @ViewBuilder
+    private func localImage(_ url: URL) -> some View {
+        if let image = NSImage(contentsOf: url) {
+            Button { preview = AttachmentPreview(url: url) } label: {
+                Image(nsImage: image)
+                    .resizable().scaledToFit()
+                    .frame(maxWidth: 620, maxHeight: 520, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(.primary.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+            .help(reference.altText.isEmpty ? url.lastPathComponent : reference.altText)
+        } else {
+            unavailable(destination: url.path)
+        }
+    }
+
+    private func remoteImage(_ url: URL) -> some View {
+        Button { NSWorkspace.shared.open(url) } label: {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().scaledToFit()
+                        .frame(maxWidth: 620, maxHeight: 520, alignment: .leading)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                case .failure:
+                    unavailable(destination: url.absoluteString)
+                default:
+                    ProgressView().frame(width: 120, height: 90)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help(reference.altText.isEmpty ? url.absoluteString : reference.altText)
+    }
+
+    private func unavailable(destination: String) -> some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(reference.altText.isEmpty ? "图片无法显示" : reference.altText)
+                Text(destination).font(GrokTypography.metadata.monospaced()).foregroundStyle(.secondary).lineLimit(2)
+            }
+        } icon: {
+            Image(systemName: "photo.badge.exclamationmark")
+        }
+        .padding(10)
+        .background(.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 
