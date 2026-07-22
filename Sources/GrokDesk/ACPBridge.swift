@@ -17,7 +17,11 @@ final class ACPBridge {
     private var process: Process?
     private var input: FileHandle?
     private var nextID = 1
-    private var callbacks: [String: (Result<JSONObject, Error>) -> Void] = [:]
+    private struct PendingRequest {
+        let method: String
+        let completion: (Result<JSONObject, Error>) -> Void
+    }
+    private var callbacks: [String: PendingRequest] = [:]
     private var reader: ACPLineReader?
     private var permissionRequests: [String: Any] = [:]
     private var suppressReplayUpdates = false
@@ -190,7 +194,8 @@ final class ACPBridge {
     }
 
     private func request(_ method: String, params: JSONObject, completion: @escaping (Result<JSONObject, Error>) -> Void) {
-        let id = String(nextID); nextID += 1; callbacks[id] = completion
+        let id = String(nextID); nextID += 1
+        callbacks[id] = PendingRequest(method: method, completion: completion)
         send(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
     }
     private func notify(_ method: String, params: JSONObject) { send(["jsonrpc": "2.0", "method": method, "params": params]) }
@@ -208,17 +213,21 @@ final class ACPBridge {
             guard let self else { return }
             if let idValue = json["id"], json["method"] == nil {
                 let id = String(describing: idValue)
-                guard let callback = self.callbacks.removeValue(forKey: id) else { return }
+                guard let pending = self.callbacks.removeValue(forKey: id) else { return }
                 if let error = json["error"] as? JSONObject {
                     let message = error["message"] as? String ?? "ACP 请求失败"
+                    let numericCode = ACPDiagnosticPolicy.integerCode(from: error["code"])
                     let code = error["code"].map { String(describing: $0) }
                     let data = error["data"].map { String(describing: $0) }
                     let diagnostic = [code.map { "code=\($0)" }, data.map { "data=\($0)" }]
                         .compactMap { $0 }.joined(separator: ", ")
-                    if !diagnostic.isEmpty { self.onDiagnostic?("ACP 错误：\(message)（\(diagnostic)）") }
-                    callback(.failure(Self.error(message)))
-                } else if let object = json["result"] as? JSONObject { callback(.success(object)) }
-                else { callback(.success(["_value": json["result"] ?? NSNull()])) }
+                    if !diagnostic.isEmpty,
+                       ACPDiagnosticPolicy.shouldPublish(method: pending.method, errorCode: numericCode) {
+                        self.onDiagnostic?("ACP 错误：\(message)（\(diagnostic)）")
+                    }
+                    pending.completion(.failure(Self.error(message)))
+                } else if let object = json["result"] as? JSONObject { pending.completion(.success(object)) }
+                else { pending.completion(.success(["_value": json["result"] ?? NSNull()])) }
                 return
             }
             var method = json["method"] as? String ?? "unknown"
