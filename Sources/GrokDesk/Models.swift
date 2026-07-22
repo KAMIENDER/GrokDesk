@@ -53,6 +53,69 @@ struct ChatTimelineEvent: Identifiable, Codable, Hashable {
     var output: String?
 }
 
+/// Keeps the durable conversation timeline focused on user-relevant actions.
+/// Grok's raw update log remains the source of truth for protocol diagnostics;
+/// duplicating high-frequency deltas and embedded binary blobs in state.json
+/// makes every app launch and transcript switch needlessly expensive.
+enum TimelinePersistencePolicy {
+    private static let redundantExtensionNames: Set<String> = [
+        "available commands update", "tool call delta chunk",
+        "pending interaction", "interaction resolved",
+        "x.ai/queue/changed", "x.ai/announcements/update",
+        "model changed", "x.ai/settings/update",
+        "x.ai/mcp initialized", "x.ai/mcp/servers updated"
+    ]
+
+    static func isRedundantExtension(_ name: String) -> Bool {
+        redundantExtensionNames.contains(normalized(name))
+    }
+
+    static func prepare(_ events: [ChatTimelineEvent]) -> [ChatTimelineEvent] {
+        events.compactMap { event in
+            guard !(event.kind == "extension" && isRedundantExtension(event.title)) else { return nil }
+            var compacted = event
+            compacted.input = compactSerializedPayload(event.input)
+            compacted.output = compactSerializedPayload(event.output)
+            return compacted
+        }
+    }
+
+    /// Sanitizes a structured ACP payload before it becomes timeline text.
+    /// Text remains intact; only large binary `data` fields are replaced.
+    static func compactJSONObject(_ value: Any) -> Any {
+        if let dictionary = value as? [String: Any] {
+            var result = dictionary.mapValues(compactJSONObject)
+            if let type = dictionary["type"] as? String,
+               ["image", "audio"].contains(type.lowercased()),
+               let data = dictionary["data"] as? String,
+               data.count > 4_096 {
+                result["data"] = "[binary \(type.lowercased()) data omitted by GrokDesk: \(data.count) characters]"
+            }
+            return result
+        }
+        if let array = value as? [Any] { return array.map(compactJSONObject) }
+        return value
+    }
+
+    private static func compactSerializedPayload(_ value: String?) -> String? {
+        guard let value, value.count > 4_096,
+              value.contains("\"data\""),
+              let data = value.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              JSONSerialization.isValidJSONObject(object),
+              let compacted = try? JSONSerialization.data(
+                withJSONObject: compactJSONObject(object), options: [.prettyPrinted]
+              ) else { return value }
+        return String(data: compacted, encoding: .utf8) ?? value
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: " ")
+            .lowercased()
+    }
+}
+
 struct ContextUsage: Hashable {
     var usedTokens: Int
     var totalTokens: Int

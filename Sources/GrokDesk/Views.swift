@@ -470,12 +470,14 @@ struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showInspector: Bool
     @Binding var showSidebar: Bool
+    private static let messagePageSize = 12
     /// Draft text belongs to a conversation, not to the chat window. Keeping
     /// one shared string lets a background stream re-render the composer while
     /// the user is editing another session and also leaks drafts on switching.
     @State private var promptsByConversation: [UUID: String] = [:]
-    @State private var visibleMessageLimit = 80
+    @State private var visibleMessageLimit = ChatView.messagePageSize
     @State private var isNearLatestMessage = true
+    @State private var followLatestTask: Task<Void, Never>?
 
     private static let latestMessageAnchor = "chat-latest-message-anchor"
 
@@ -493,10 +495,12 @@ struct ChatView: View {
         }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.34))
         .onChange(of: model.selectedConversationID) { _, _ in
+            followLatestTask?.cancel()
+            isNearLatestMessage = true
             // Opening a long chat starts from its recent turns. Older turns are
             // opt-in so switching sessions does not eagerly build thousands of
             // Markdown and timeline subviews.
-            visibleMessageLimit = 80
+            visibleMessageLimit = Self.messagePageSize
         }
     }
 
@@ -521,18 +525,22 @@ struct ChatView: View {
         return ScrollViewReader { proxy in
             GeometryReader { viewport in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 26) {
+                    // Only the recent bounded window is rendered, so eagerly
+                    // measuring it is inexpensive and gives macOS a stable
+                    // height for the initial bottom anchor. LazyVStack can
+                    // estimate an empty region until the first wheel gesture.
+                    VStack(alignment: .leading, spacing: 26) {
                         if messages.isEmpty {
                             EmptyConversationView()
                                 .frame(maxWidth: .infinity).padding(.top, 110)
                         } else {
                             if hiddenCount > 0 {
                                 Button {
-                                    visibleMessageLimit += 80
+                                    visibleMessageLimit += Self.messagePageSize
                                 } label: {
                                     Label(
                                         L10n.format("加载更早消息（%@ 条）", language: model.settings.effectiveLanguage,
-                                                    String(hiddenCount)),
+                                                    String(min(hiddenCount, Self.messagePageSize))),
                                         systemImage: "clock.arrow.circlepath"
                                     )
                                 }
@@ -558,8 +566,9 @@ struct ChatView: View {
                     }
                     .frame(maxWidth: 780)
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 34).padding(.top, 34).padding(.bottom, 150)
+                    .padding(.horizontal, 34).padding(.top, 34).padding(.bottom, 28)
                 }
+                .defaultScrollAnchor(.bottom)
                 .coordinateSpace(name: "chat-message-scroll")
                 .onPreferenceChange(ChatLatestMessagePositionKey.self) { bottomY in
                     isNearLatestMessage = bottomY <= viewport.size.height + 72
@@ -583,32 +592,58 @@ struct ChatView: View {
                         .padding(.trailing, 24).padding(.bottom, 18)
                     }
                 }
-                .onAppear { scrollToLatest(proxy, animated: false) }
-                .onChange(of: model.selectedConversationID) { _, _ in
-                    scrollToLatest(proxy, animated: false)
-                }
-                .onChange(of: model.selectedConversation?.messages.last?.text) { _, _ in
+                .onChange(of: latestMessageSignal) { _, _ in
                     guard isNearLatestMessage else { return }
-                    scrollToLatest(proxy, animated: true)
+                    scheduleFollowLatest(proxy, conversationID: model.selectedConversationID)
                 }
+                .onDisappear { followLatestTask?.cancel() }
             }
         }
+        // ScrollViewReader otherwise keeps the previous session's scroll
+        // storage and applies the new transcript from the top before scrollTo.
+        .id(model.selectedConversationID)
     }
 
-    private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
-        // Wait until the selected transcript and its 80-message window have
-        // completed the current layout pass before resolving the anchor.
-        DispatchQueue.main.async {
-            if animated {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo(Self.latestMessageAnchor, anchor: .bottom)
-                }
-            } else {
+    /// SwiftUI's `onChange` would otherwise compare the complete last message,
+    /// including every persisted tool payload, on each streamed update.
+    private var latestMessageSignal: LatestMessageSignal? {
+        guard let message = model.selectedConversation?.messages.last else { return nil }
+        return LatestMessageSignal(
+            id: message.id,
+            textLength: message.text.utf8.count,
+            thoughtLength: message.thought?.utf8.count ?? 0,
+            mediaCount: message.media?.count ?? 0,
+            eventCount: message.events?.count ?? 0,
+            isStreaming: message.isStreaming
+        )
+    }
+
+    private func scheduleFollowLatest(_ proxy: ScrollViewProxy, conversationID: UUID?) {
+        followLatestTask?.cancel()
+        followLatestTask = Task { @MainActor in
+            // Coalesce streaming deltas into one post-layout update. Re-checking
+            // proximity after yielding lets a user's wheel/trackpad gesture
+            // cancel automatic following immediately.
+            await Task.yield()
+            guard !Task.isCancelled,
+                  model.selectedConversationID == conversationID,
+                  isNearLatestMessage else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
                 proxy.scrollTo(Self.latestMessageAnchor, anchor: .bottom)
             }
-            isNearLatestMessage = true
         }
     }
+}
+
+private struct LatestMessageSignal: Equatable {
+    let id: UUID
+    let textLength: Int
+    let thoughtLength: Int
+    let mediaCount: Int
+    let eventCount: Int
+    let isStreaming: Bool
 }
 
 private struct ChatLatestMessagePositionKey: PreferenceKey {
@@ -1086,8 +1121,9 @@ private enum ActivityCategory: Int, CaseIterable, Identifiable {
     }
 
     static func category(for event: ChatTimelineEvent) -> ActivityCategory {
-        let haystack = ([event.kind, event.title, event.input, event.output].compactMap { $0 })
-            .joined(separator: " ").lowercased()
+        // Classification metadata is sufficient. Scanning tool input/output here
+        // made a collapsed process row repeatedly traverse multi-megabyte payloads.
+        let haystack = [event.kind, event.title].joined(separator: " ").lowercased()
         if haystack.contains("hook") || haystack.contains("pre_tool_use") || haystack.contains("post_tool_use") { return .hooks }
         if haystack.contains("skill") || haystack.contains("plugin") || haystack.contains("/skills/") { return .skills }
         if event.kind == "thought" { return .reasoning }

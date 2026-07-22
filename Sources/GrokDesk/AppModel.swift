@@ -88,6 +88,7 @@ final class AppModel: ObservableObject {
         // An unsent folder selection is not a completed conversation and must
         // not survive an app relaunch as an extra empty sidebar session.
         conversations.removeAll(where: \.isUnsentLocalDraft)
+        compactPersistedTimelines()
         if !conversations.contains(where: { $0.id == selectedConversationID }) {
             selectedConversationID = nil
         }
@@ -142,6 +143,18 @@ final class AppModel: ObservableObject {
         try? StateStore.save(PersistedState(accounts: accounts, conversations: conversations,
                                              selectedConversationID: selectedConversationID, settings: settings,
                                              hiddenProjectPaths: hiddenProjectPaths))
+    }
+
+    /// Older GrokDesk versions copied high-frequency ACP protocol updates and
+    /// embedded image/audio bytes into state.json. Compact them once on load so
+    /// subsequent launches and chat switches operate on the useful timeline.
+    private func compactPersistedTimelines() {
+        for conversationIndex in conversations.indices {
+            for messageIndex in conversations[conversationIndex].messages.indices {
+                guard let events = conversations[conversationIndex].messages[messageIndex].events else { continue }
+                conversations[conversationIndex].messages[messageIndex].events = TimelinePersistencePolicy.prepare(events)
+            }
+        }
     }
 
     func completeLanguageOnboarding(language: String) {
@@ -1041,6 +1054,7 @@ final class AppModel: ObservableObject {
     private func upsertTimelineEvent(_ event: ChatTimelineEvent, conversationID: UUID) {
         guard let c = conversations.firstIndex(where: { $0.id == conversationID }),
               let m = conversations[c].messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) else { return }
+        guard let event = TimelinePersistencePolicy.prepare([event]).first else { return }
         var events = conversations[c].messages[m].events ?? []
         if let index = events.firstIndex(where: { $0.id == event.id }) { events[index] = event }
         else { events.append(event) }
@@ -1167,6 +1181,7 @@ final class AppModel: ObservableObject {
         // extension is retained inline, including unknown future event types, so
         // the UI cannot silently discard a new Grok capability it does not know yet.
         guard method != "user_message_chunk", method != "user_message" else { return }
+        guard !TimelinePersistencePolicy.isRedundantExtension(method) else { return }
         let kind = extensionKind(method)
         // Low-level session/model/queue lifecycle notifications remain in the
         // Run Details inspector but do not belong in the user-facing process
@@ -1219,7 +1234,10 @@ final class AppModel: ObservableObject {
     private func jsonText(_ value: Any?) -> String? {
         guard let value else { return nil }
         if let string = value as? String { return string }
-        guard JSONSerialization.isValidJSONObject(value), let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted]) else { return String(describing: value) }
+        let compacted = TimelinePersistencePolicy.compactJSONObject(value)
+        guard JSONSerialization.isValidJSONObject(compacted),
+              let data = try? JSONSerialization.data(withJSONObject: compacted, options: [.prettyPrinted])
+        else { return String(describing: value) }
         return String(data: data, encoding: .utf8)
     }
 
