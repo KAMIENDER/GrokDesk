@@ -5,7 +5,11 @@
 </p>
 
 <p align="center">
-  面向 <a href="https://github.com/xai-org/grok-build">Grok Build</a> 的原生开源 macOS 桌面客户端。
+  <strong>让 Grok Build 走出终端。</strong>
+</p>
+
+<p align="center">
+  直接构建于 <a href="https://github.com/xai-org/grok-build">Grok Build</a> Runtime 之上的原生开源 macOS 工作台，提供完整 Agent 过程展示、CLI Session 共享与额度感知的多账号路由。
 </p>
 
 <p align="center">
@@ -15,7 +19,7 @@
 > [!IMPORTANT]
 > GrokDesk 是独立的社区项目，与 xAI 没有关联，也未获得其认可。Grok 与 Grok Build 是其各自所有者的商标。
 
-GrokDesk 将本机 Grok Build Runtime 的 ACP/JSON-RPC 能力呈现为现代化的原生 SwiftUI 桌面界面。它不是内嵌终端，也不会重新实现 Grok Agent；文件、Shell、Git、MCP、Skills、Plugins、Hooks、Memory、Subagent 等能力仍由本机 Grok Build 执行。
+GrokDesk 是 Grok Build 的原生 macOS 体验层，而不是另一套通用 Agent Harness。它将本机 Runtime 的 ACP/JSON-RPC 能力呈现为现代化的 SwiftUI 桌面界面，同时保留 Grok Build 的 Session、工具与扩展语义。它不是内嵌终端，也不会重新实现 Grok Agent；文件、Shell、Git、MCP、Skills、Plugins、Hooks、Memory、Subagent 等能力仍由本机 Grok Build 执行。
 
 ## 功能
 

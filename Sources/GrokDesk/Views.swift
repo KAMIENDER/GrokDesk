@@ -1351,11 +1351,18 @@ private struct ContextUsageIndicator: View {
         }
         .buttonStyle(.plain)
         .frame(width: 28, height: 28)
-        .help("Context window：\(percent)% 已使用（剩余 \(100 - percent)%）\n\(format(usage.usedTokens)) / \(format(usage.totalTokens)) tokens")
+        .help(L10n.format("Context window：%d%% 已使用（剩余 %d%%）\n%@ / %@ tokens",
+                          language: model.settings.effectiveLanguage,
+                          percent, 100 - percent,
+                          format(usage.usedTokens), format(usage.totalTokens)))
         .popover(isPresented: $showingDetails, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Context window").font(.headline)
-                HStack { Text("使用情况"); Spacer(); Text("\(percent)%") }
+                HStack {
+                    Text(L10n.text("使用情况", language: model.settings.effectiveLanguage))
+                    Spacer()
+                    Text("\(percent)%")
+                }
                 ProgressView(value: usage.fraction)
                 Text("\(format(usage.usedTokens)) / \(format(usage.totalTokens)) tokens")
                     .font(GrokTypography.metadata).foregroundStyle(.secondary)

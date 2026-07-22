@@ -5,7 +5,11 @@
 </p>
 
 <p align="center">
-  A native, open-source macOS desktop client for <a href="https://github.com/xai-org/grok-build">Grok Build</a>.
+  <strong>Grok Build, beyond the terminal.</strong>
+</p>
+
+<p align="center">
+  A native, open-source macOS workspace built directly on the <a href="https://github.com/xai-org/grok-build">Grok Build</a> runtime—with full agent visibility, shared CLI sessions, and quota-aware multi-account routing.
 </p>
 
 <p align="center">
@@ -15,7 +19,7 @@
 > [!IMPORTANT]
 > GrokDesk is an independent community project. It is not affiliated with or endorsed by xAI. Grok and Grok Build are trademarks of their respective owner.
 
-GrokDesk presents the ACP/JSON-RPC capabilities of a local Grok Build runtime through a modern native SwiftUI interface. It does not embed a terminal or reimplement the agent. File operations, shell commands, Git, MCP, Skills, Plugins, Hooks, Memory, and subagents continue to run through Grok Build.
+GrokDesk is the native macOS experience layer for Grok Build, not a separate general-purpose agent harness. It presents the ACP/JSON-RPC capabilities of the local runtime through a modern SwiftUI interface while preserving Grok Build's Sessions, tools, and extension semantics. It does not embed a terminal or reimplement the agent. File operations, shell commands, Git, MCP, Skills, Plugins, Hooks, Memory, and subagents continue to run through Grok Build.
 
 ## Highlights
 
