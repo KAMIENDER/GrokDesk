@@ -87,6 +87,18 @@ swift build -c release --product GrokDesk
 
 推送 `v0.1.3` 这样的版本标签会触发 GitHub Release 工作流。仓库需要配置由 Sparkle `generate_keys` 工具导出的 `SPARKLE_PRIVATE_KEY` Actions Secret；私钥不得提交到仓库。
 
+## 录制演示
+
+使用全新的隔离演示档案启动 GrokDesk，并录制隐私安全的视频或 GIF：
+
+```bash
+./scripts/record-demo.sh --gif
+```
+
+脚本不会修改正常的 GrokDesk 档案或 Grok Build Session。显示器选择、推荐
+演示流程和隐私注意事项请查看[演示录制说明](docs/DEMO_RECORDING.zh-CN.md)。
+[English guide](docs/DEMO_RECORDING.md)
+
 ## 架构
 
 ```text

@@ -87,6 +87,19 @@ Maintainers can create the DMG, Sparkle ZIP, and signed `appcast.xml` together w
 
 Pushing a version tag such as `v0.1.3` runs the release workflow. The repository must contain a `SPARKLE_PRIVATE_KEY` Actions secret exported from Sparkle's `generate_keys` tool; the private key must never be committed.
 
+## Record a demo
+
+Launch GrokDesk with a fresh, isolated demo profile and record a privacy-safe
+video or GIF:
+
+```bash
+./scripts/record-demo.sh --gif
+```
+
+The normal GrokDesk profile and Grok Build Sessions are not modified. See the
+[demo recording guide](docs/DEMO_RECORDING.md) for monitor selection, the
+recommended walkthrough, and privacy notes. [中文说明](docs/DEMO_RECORDING.zh-CN.md)
+
 ## Architecture
 
 ```text

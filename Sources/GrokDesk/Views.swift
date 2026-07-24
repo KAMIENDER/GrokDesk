@@ -72,6 +72,9 @@ struct ContentView: View {
         .sheet(item: $model.pendingPermission) { PermissionSheet(permission: $0) }
         .sheet(item: $model.pendingQuestion) { QuestionSheet(request: $0) }
         .sheet(item: $model.pendingPlanApproval) { PlanApprovalSheet(request: $0) }
+        .sheet(item: $model.demoWorkspaceRequest) { request in
+            DemoWorkspacePickerView(request: request)
+        }
         .alert("需要安装 Grok Build", isPresented: $model.showRuntimeInstallPrompt) {
             Button("稍后", role: .cancel) { }
             Button("安装最新版") { model.installLatestRuntime() }
@@ -141,11 +144,110 @@ private struct RuntimeInstallerSheet: View {
     }
 }
 
+private enum WorkspacePresentation {
+    static func displayName(for path: String, language: String) -> String {
+        if AppLaunchMode.current == .demo,
+           let mockName = DemoWorkspaceCatalog.displayName(for: path) {
+            return L10n.text(mockName, language: language)
+        }
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let home = FileManager.default.homeDirectoryForCurrentUser
+            .standardizedFileURL.resolvingSymlinksInPath()
+
+        // A home directory's final path component is commonly the macOS account
+        // name. It is runtime context, not project content, so never surface it.
+        if url == home {
+            return L10n.text("主目录", language: language)
+        }
+        let name = url.lastPathComponent
+        return name.isEmpty ? L10n.text("已选择工作目录", language: language) : name
+    }
+}
+
+private struct DemoWorkspacePickerView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let request: DemoWorkspaceRequest
+
+    private func text(_ key: String) -> String {
+        L10n.text(key, language: model.settings.effectiveLanguage)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 26, weight: .medium))
+                    .frame(width: 44, height: 44)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(text("选择演示项目")).font(.title2.weight(.semibold))
+                    Text(text("演示模式仅显示安全的示例项目，不会访问或展示你的本地路径。"))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            VStack(spacing: 10) {
+                ForEach(DemoWorkspaceCatalog.choices) { choice in
+                    Button {
+                        model.selectDemoWorkspace(choice, for: request)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 14) {
+                            Image(systemName: "folder.fill")
+                                .foregroundStyle(Color.accentColor)
+                                .font(.title3)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(text(choice.nameKey))
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Text(text(choice.subtitleKey))
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(16)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    }
+                }
+            }
+
+            HStack {
+                Label(text("已隐藏用户名与绝对路径"), systemImage: "eye.slash")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(text("取消")) {
+                    model.cancelDemoWorkspaceSelection()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 620)
+        .interactiveDismissDisabled()
+    }
+}
+
 private struct ConversationProject: Identifiable {
     let path: String
     let conversations: [Conversation]
     var id: String { path }
-    var name: String { URL(fileURLWithPath: path).lastPathComponent.isEmpty ? path : URL(fileURLWithPath: path).lastPathComponent }
+    func displayName(language: String) -> String {
+        WorkspacePresentation.displayName(for: path, language: language)
+    }
 }
 
 private struct SidebarResizeDivider: View {
@@ -242,6 +344,7 @@ struct AppSidebar: View {
                     ForEach(projects) { project in
                         ProjectHeaderRow(
                             project: project,
+                            language: model.settings.effectiveLanguage,
                             isExpanded: !collapsedProjects.contains(project.path),
                             toggleExpanded: { toggle(project.path) },
                             hideProject: { model.hideProject(project.path) }
@@ -318,11 +421,14 @@ struct AppSidebar: View {
 
 private struct ProjectHeaderRow: View {
     let project: ConversationProject
+    let language: String
     let isExpanded: Bool
     let toggleExpanded: () -> Void
     let hideProject: () -> Void
     let createConversation: () -> Void
     @State private var hovering = false
+
+    private var projectName: String { project.displayName(language: language) }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -333,7 +439,7 @@ private struct ProjectHeaderRow: View {
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .frame(width: 10)
-                    Label(project.name, systemImage: "folder")
+                    Label(projectName, systemImage: "folder")
                         .font(GrokTypography.item(.medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -351,10 +457,10 @@ private struct ProjectHeaderRow: View {
             }
             .buttonStyle(.plain)
             .opacity(hovering ? 1 : 0.45)
-            .help("在 \(project.name) 中新建对话")
+            .help("在 \(projectName) 中新建对话")
         }
         .onHover { hovering = $0 }
-        .help(isExpanded ? "折叠 \(project.name)" : "展开 \(project.name)")
+        .help(isExpanded ? "折叠 \(projectName)" : "展开 \(projectName)")
         .contextMenu {
             Button("在此项目中新建对话", action: createConversation)
             Button("从侧栏移除项目", role: .destructive, action: hideProject)
@@ -659,7 +765,7 @@ struct ChatHeader: View {
         guard let cwd = model.selectedConversation?.cwd else {
             return L10n.text("选择项目", language: model.settings.effectiveLanguage)
         }
-        return URL(fileURLWithPath: cwd).lastPathComponent.isEmpty ? cwd : URL(fileURLWithPath: cwd).lastPathComponent
+        return WorkspacePresentation.displayName(for: cwd, language: model.settings.effectiveLanguage)
     }
     var body: some View {
         HStack(spacing: 10) {
@@ -674,8 +780,7 @@ struct ChatHeader: View {
                     Image(systemName: "folder").foregroundStyle(.secondary)
                     Text(projectName).fontWeight(.medium).lineLimit(1)
                 }
-            }.buttonStyle(.plain).help(model.selectedConversation?.cwd
-                ?? L10n.text("选择工作目录", language: model.settings.effectiveLanguage))
+            }.buttonStyle(.plain).help(projectName)
             Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
             Text(model.selectedConversation?.title ?? L10n.text("新对话", language: model.settings.effectiveLanguage)).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
@@ -696,12 +801,21 @@ struct ChatHeader: View {
 
 struct EmptyConversationView: View {
     @EnvironmentObject private var model: AppModel
+
+    private var workspaceDisplayName: String {
+        guard let cwd = model.selectedConversation?.cwd else {
+            return L10n.text("选择一个工作目录，然后把任务交给 Grok",
+                             language: model.settings.effectiveLanguage)
+        }
+
+        return WorkspacePresentation.displayName(for: cwd, language: model.settings.effectiveLanguage)
+    }
+
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "sparkles").font(.system(size: 28, weight: .light)).foregroundStyle(.secondary)
             Text("今天想构建什么？").font(.system(size: 24, weight: .semibold))
-            Text(model.selectedConversation?.cwd
-                 ?? L10n.text("选择一个工作目录，然后把任务交给 Grok", language: model.settings.effectiveLanguage))
+            Text(workspaceDisplayName)
                 .font(.callout).foregroundStyle(.secondary).lineLimit(1)
             if model.accounts.isEmpty {
                 Button("添加 Grok 账号", action: model.showAccountSettings).buttonStyle(.borderedProminent)
@@ -807,16 +921,14 @@ struct ComposerView: View {
             .background(.secondary.opacity(0.07), in: Capsule())
         }
         .buttonStyle(.plain)
-        .help(model.selectedConversation?.cwd
-            ?? L10n.text("选择工作文件夹", language: model.settings.effectiveLanguage))
+        .help(workspaceName)
     }
 
     private var workspaceName: String {
         guard let path = model.selectedConversation?.cwd else {
             return L10n.text("选择文件夹", language: model.settings.effectiveLanguage)
         }
-        let name = URL(fileURLWithPath: path).lastPathComponent
-        return name.isEmpty ? path : name
+        return WorkspacePresentation.displayName(for: path, language: model.settings.effectiveLanguage)
     }
 
     private var attachments: some View {
@@ -2128,6 +2240,7 @@ struct SettingsView: View {
     @EnvironmentObject private var updateManager: UpdateManager
     @Binding private var sidebarWidth: CGFloat
     @State private var search = ""
+    @State private var selectedLaunchMode = AppLaunchMode.current.rawValue
     @FocusState private var searchFocused: Bool
 
     init(sidebarWidth: Binding<CGFloat> = .constant(280)) {
@@ -2237,6 +2350,22 @@ struct SettingsView: View {
                         Text(verbatim: "简体中文").tag("zh-Hans")
                         Text(verbatim: "English").tag("en")
                     }.labelsHidden().frame(width: 150)
+                }
+            }
+            SettingsGroup(title: "运行模式") {
+                SettingsRow(title: "数据与会话", detail: "演示模式使用独立数据，不导入本机历史会话") {
+                    HStack(spacing: 10) {
+                        Picker("运行模式", selection: $selectedLaunchMode) {
+                            Text("正常模式").tag(AppLaunchMode.normal.rawValue)
+                            Text("演示模式").tag(AppLaunchMode.demo.rawValue)
+                        }
+                        .labelsHidden().frame(width: 140)
+
+                        if selectedLaunchMode != model.launchMode.rawValue,
+                           let mode = AppLaunchMode(rawValue: selectedLaunchMode) {
+                            Button("切换并重启") { model.switchLaunchModeAndRestart(mode) }
+                        }
+                    }
                 }
             }
             SettingsGroup(title: "软件更新") {
@@ -2494,7 +2623,10 @@ private struct ArchivedChatsView: View {
     private var groups: [ConversationProject] {
         Dictionary(grouping: archived, by: \.cwd).map {
             ConversationProject(path: $0.key, conversations: $0.value)
-        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }.sorted {
+            $0.displayName(language: model.settings.effectiveLanguage)
+                .localizedStandardCompare($1.displayName(language: model.settings.effectiveLanguage)) == .orderedAscending
+        }
     }
 
     var body: some View {
@@ -2504,7 +2636,8 @@ private struct ArchivedChatsView: View {
                 Picker("文件夹", selection: $projectPath) {
                     Text("全部文件夹").tag("__all__")
                     ForEach(projectPaths, id: \.self) { path in
-                        Text(URL(fileURLWithPath: path).lastPathComponent).tag(path)
+                        Text(WorkspacePresentation.displayName(for: path,
+                                                               language: model.settings.effectiveLanguage)).tag(path)
                     }
                 }.frame(width: 180)
             }
@@ -2516,7 +2649,8 @@ private struct ArchivedChatsView: View {
                 ForEach(groups) { project in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Label(project.name, systemImage: "folder").font(GrokTypography.item(.semibold))
+                            Label(project.displayName(language: model.settings.effectiveLanguage), systemImage: "folder")
+                                .font(GrokTypography.item(.semibold))
                             Spacer()
                             Text(L10n.format("%d 个对话", language: model.settings.effectiveLanguage,
                                              project.conversations.count))

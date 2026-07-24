@@ -1,10 +1,88 @@
 import AppKit
 import Foundation
 
+enum AppLaunchMode: String, CaseIterable {
+    case normal
+    case demo
+
+    private static let defaultsKey = "GrokDeskLaunchMode"
+
+    static var current: AppLaunchMode {
+        let environment = ProcessInfo.processInfo.environment
+        // Command-line demo profiles remain useful for automated recordings.
+        // Treat them as demo mode even when the saved preference is normal.
+        if environment["GROKDESK_SKIP_SESSION_IMPORT"] == "1"
+            || !(environment["GROKDESK_STATE_ROOT"] ?? "").isEmpty {
+            return .demo
+        }
+        return AppLaunchMode(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .normal
+    }
+
+    static func save(_ mode: AppLaunchMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: defaultsKey)
+    }
+}
+
+enum DemoWorkspaceRequest: String, Identifiable {
+    case createConversation
+    case updateConversation
+
+    var id: String { rawValue }
+}
+
+struct DemoWorkspaceChoice: Identifiable, Hashable {
+    let id: String
+    let nameKey: String
+    let subtitleKey: String
+    let path: String
+}
+
+enum DemoWorkspaceCatalog {
+    /// Demo workspaces deliberately live outside the user's home directory.
+    /// Their on-screen labels are fixed mock names, so recordings never reveal
+    /// the macOS account name, recent folders, or a private absolute path.
+    static let choices: [DemoWorkspaceChoice] = [
+        DemoWorkspaceChoice(
+            id: "swiftui-sample",
+            nameKey: "GrokDesk 示例项目",
+            subtitleKey: "一个用于演示代码读取、编辑与工具调用的 SwiftUI 工作区",
+            path: "/Users/Shared/GrokDesk-Demo/SwiftUI-Sample"
+        ),
+        DemoWorkspaceChoice(
+            id: "agent-sample",
+            nameKey: "Agent 示例项目",
+            subtitleKey: "一个用于演示 Skills、Hooks 与命令执行的安全工作区",
+            path: "/Users/Shared/GrokDesk-Demo/Agent-Sample"
+        )
+    ]
+
+    static func prepare(_ choice: DemoWorkspaceChoice) {
+        try? FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: choice.path, isDirectory: true),
+            withIntermediateDirectories: true
+        )
+    }
+
+    static func displayName(for path: String) -> String? {
+        let standardized = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
+        return choices.first {
+            URL(fileURLWithPath: $0.path, isDirectory: true).standardizedFileURL.path == standardized
+        }?.nameKey
+    }
+}
+
 enum AppPaths {
     static let root: URL = {
+        // Tests and product demos can use a disposable profile without touching the
+        // user's real GrokDesk state. Normal launches do not set this environment value.
+        if let override = ProcessInfo.processInfo.environment["GROKDESK_STATE_ROOT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("GrokDesk", isDirectory: true)
+        let profileName = AppLaunchMode.current == .demo ? "GrokDesk Demo" : "GrokDesk"
+        return base.appendingPathComponent(profileName, isDirectory: true)
     }()
     static let accounts = root.appendingPathComponent("accounts", isDirectory: true)
     static let pastedAttachments = root.appendingPathComponent("Pasted Attachments", isDirectory: true)

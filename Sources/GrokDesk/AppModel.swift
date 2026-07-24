@@ -46,6 +46,8 @@ final class AppModel: ObservableObject {
     @Published var runtimeInstallLog = ""
     @Published var runtimeInstallError: String?
     @Published private(set) var needsLanguageOnboarding = false
+    @Published private(set) var launchMode = AppLaunchMode.current
+    @Published var demoWorkspaceRequest: DemoWorkspaceRequest?
 
     private let cli = CLIProcessService()
     private let runtimeInstaller = GrokRuntimeInstaller()
@@ -59,6 +61,7 @@ final class AppModel: ObservableObject {
     }
     private var pendingACPUpdates: [UUID: [PendingACPUpdate]] = [:]
     private var acpFlushTasks: [UUID: Task<Void, Never>] = [:]
+    private var pendingDemoConversationAccount: GrokAccount?
 
     private func localized(_ key: String) -> String {
         L10n.text(key, language: settings.effectiveLanguage)
@@ -143,6 +146,30 @@ final class AppModel: ObservableObject {
         try? StateStore.save(PersistedState(accounts: accounts, conversations: conversations,
                                              selectedConversationID: selectedConversationID, settings: settings,
                                              hiddenProjectPaths: hiddenProjectPaths))
+    }
+
+    func switchLaunchModeAndRestart(_ mode: AppLaunchMode) {
+        guard mode != launchMode else { return }
+        persist()
+        AppLaunchMode.save(mode)
+
+        let applicationURL = Bundle.main.bundleURL
+        guard applicationURL.pathExtension == "app" else {
+            statusText = localized("运行模式已保存，请重新启动 GrokDesk")
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { _, error in
+            DispatchQueue.main.async {
+                if let error {
+                    self.statusText = self.localizedFormat("重新启动失败：%@", error.localizedDescription)
+                } else {
+                    NSApp.terminate(nil)
+                }
+            }
+        }
     }
 
     /// Older GrokDesk versions copied high-frequency ACP protocol updates and
@@ -232,6 +259,10 @@ final class AppModel: ObservableObject {
     }
 
     func syncLocalSessions() {
+        // An isolated demo profile must not repopulate itself from the user's real
+        // ~/.grok/sessions directory. The default production behavior is unchanged.
+        guard AppLaunchMode.current == .normal,
+              ProcessInfo.processInfo.environment["GROKDESK_SKIP_SESSION_IMPORT"] != "1" else { return }
         let summaries = LocalSessionIndex.summaries()
         let known = Set(conversations.compactMap(\.grokSessionID))
         conversations.append(contentsOf: summaries.filter { session in
@@ -273,6 +304,11 @@ final class AppModel: ObservableObject {
     func newConversation(in cwd: String) { createConversation(cwd: cwd) }
 
     private func newConversation(account: GrokAccount?) {
+        if launchMode == .demo {
+            pendingDemoConversationAccount = account
+            demoWorkspaceRequest = .createConversation
+            return
+        }
         let panel = NSOpenPanel()
         panel.title = L10n.text("选择 Grok 工作文件夹", language: settings.effectiveLanguage)
         panel.message = L10n.text("Grok 将在这个文件夹中读取文件、修改代码并运行工具。", language: settings.effectiveLanguage)
@@ -1102,6 +1138,18 @@ final class AppModel: ObservableObject {
         upsertTimelineEvent(.init(id: "interaction-\(requestID)", kind: "permission",
                                   title: tool?["title"] as? String ?? "Grok 请求执行操作", status: "pending",
                                   input: jsonText(params), output: nil), conversationID: conversationID)
+        if settings.permissionMode == "bypassPermissions",
+           let allow = preferredBypassPermissionOption(in: options),
+           let runtime = runtimes[conversationID] {
+            // Permission mode can be changed after an ACP session has started. Grok Build only
+            // receives yoloMode during session/new or session/load, so handle later permission
+            // requests here as well; otherwise the UI says Full access but still opens a sheet.
+            upsertTimelineEvent(.init(id: "interaction-\(requestID)", kind: "permission",
+                                      title: tool?["title"] as? String ?? "Grok 请求执行操作", status: "approved",
+                                      input: jsonText(params), output: "完全访问模式：自动允许"), conversationID: conversationID)
+            runtime.answerPermission(requestID: requestID, optionID: allow.id)
+            return
+        }
         if settings.permissionMode == "acceptEdits",
            (tool?["kind"] as? String ?? "").lowercased().contains("edit"),
            let allow = options.first(where: { $0.kind.lowercased().contains("allow_once") || $0.kind.lowercased().contains("allowonce") }),
@@ -1113,6 +1161,31 @@ final class AppModel: ObservableObject {
         }
         pendingPermission = PendingPermission(id: requestID, conversationID: conversationID,
                                               title: tool?["title"] as? String ?? "Grok 请求执行操作", options: options)
+    }
+
+    private func preferredBypassPermissionOption(in options: [PermissionOptionRecord]) -> PermissionOptionRecord? {
+        func searchableText(_ option: PermissionOptionRecord) -> String {
+            "\(option.id) \(option.kind) \(option.name)"
+                .lowercased()
+                .replacingOccurrences(of: "-", with: "_")
+                .replacingOccurrences(of: " ", with: "_")
+        }
+
+        // Prefer a session-scoped grant. A persistent all-session grant would outlive the
+        // user's current Full access selection and silently broaden future sessions.
+        let priorities = [
+            "allow_all_edits_during_this_session", "allow_for_session", "allow_session",
+            "allow_command_always", "allow_once", "allowonce", "yes"
+        ]
+        for priority in priorities {
+            if let option = options.first(where: { searchableText($0).contains(priority) }) {
+                return option
+            }
+        }
+        return options.first(where: {
+            let text = searchableText($0)
+            return text.contains("allow") && !text.contains("reject") && !text.contains("deny")
+        })
     }
 
     func answerPermission(_ optionID: String?) {
@@ -1337,11 +1410,40 @@ final class AppModel: ObservableObject {
     }
 
     func chooseWorkingDirectory() {
+        if launchMode == .demo {
+            demoWorkspaceRequest = .updateConversation
+            return
+        }
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         if panel.runModal() == .OK, let path = panel.url?.path, let i = selectedConversationIndex {
             if runtimes[conversations[i].id] != nil { statusText = "工作目录将在新对话生效" }
             else { conversations[i].cwd = path; persist() }
         }
+    }
+
+    func selectDemoWorkspace(_ choice: DemoWorkspaceChoice, for request: DemoWorkspaceRequest) {
+        guard launchMode == .demo else { return }
+        DemoWorkspaceCatalog.prepare(choice)
+        switch request {
+        case .createConversation:
+            createConversation(account: pendingDemoConversationAccount, cwd: choice.path)
+        case .updateConversation:
+            guard let index = selectedConversationIndex else { return }
+            if runtimes[conversations[index].id] != nil {
+                statusText = localized("工作目录将在新对话生效")
+            } else {
+                conversations[index].cwd = choice.path
+                hiddenProjectPaths.remove(choice.path)
+                persist()
+            }
+        }
+        pendingDemoConversationAccount = nil
+        demoWorkspaceRequest = nil
+    }
+
+    func cancelDemoWorkspaceSelection() {
+        pendingDemoConversationAccount = nil
+        demoWorkspaceRequest = nil
     }
 
     func chooseAttachments() {

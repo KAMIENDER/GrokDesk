@@ -38,13 +38,13 @@ struct LanguageOnboardingView: View {
                         code: "zh-Hans",
                         title: "简体中文",
                         detail: "使用简体中文界面",
-                        symbol: "character.book.closed"
+                        symbol: "globe.asia.australia"
                     )
                     languageOption(
                         code: "en",
                         title: "English",
                         detail: "Use GrokDesk in English",
-                        symbol: "textformat.abc"
+                        symbol: "globe.americas"
                     )
                 }
 
